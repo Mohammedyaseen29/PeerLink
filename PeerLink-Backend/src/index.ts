@@ -48,6 +48,13 @@ wss.on("connection", (ws: WebSocket) => {
           // Now lets broadcast to every client in the room
           broadCast(roomId, { type: "peer_joined", roomId }, ws);
           break;
+          
+        case "ice_candidate":
+          if (!joinedRoom) {
+            return;
+          }
+          broadCast(roomId, { type: "ice_candidate", payload }, ws);
+          break; 
             
         case "leave":
           if (joinedRoom && rooms.has(roomId)) {

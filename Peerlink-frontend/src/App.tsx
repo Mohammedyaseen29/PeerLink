@@ -1,34 +1,257 @@
-import { useState } from 'react'
-import reactLogo from './assets/react.svg'
-import viteLogo from '/vite.svg'
-import './App.css'
+import { useRef, useState } from "react";
+
+const iceServers = [
+  { urls: "stun:stun.l.google.com:19302" },
+  {
+    urls: "turn:openrelay.metered.ca:80",
+    username: "openrelayproject",
+    credential: "openrelayproject",
+  },
+];  
+
 
 function App() {
-  const [count, setCount] = useState(0)
+  const [roomId, setRoomId] = useState('');
+  const [connected, setConnected] = useState(false);
+  const [log, setLog] = useState([]);
+  const [file, setFile] = useState(null);
+  const [progress,setProgress] = useState(0);
+  
+  
+  const wsRef = useRef<WebSocket | null>(null);
+  const pcRef = useRef<RTCPeerConnection | null>(null);
+  const dcRef = useRef<RTCDataChannel | null>(null);
+  const receivedBuffer = useRef<ArrayBuffer[]>([]);
+  const receivedSize = useRef<number>(0);
+  const fileMeta = useRef(null);
+  
+  
+  const log = (m)=>setLog((p)=>[...p,m]) || console.log(m);
+  
+  
+  
+  const connectWebsocket = () => { 
+    if (wsRef.current) { 
+      return;
+    }
+    const ws = new WebSocket("ws://localhost:3000");
+    ws.onopen = () => { 
+      console.log("client is connected");
+    }
+    
+    ws.onmessage = async (event) => {
+      const data = JSON.parse(event.data);
+      console.log(data.type);
+      
+      switch (data.type) { 
+        case "joined":
+          ensurePeer(); // if u joined first then u will wait for peer to join
+          if (data.peers === 2) { // if joined as second peer if have to send the offer
+            await makeOffer();
+          }
+          break;
+        case "peer_joined": // you are the second guy joined in the room
+          ensurePeer();
+          await makeOffer();
+          break;
+          
+        case "offer":
+          ensurePeer();
+          await pcRef.current?.setRemoteDescription(data.payload);
+          const answer = await pcRef.current?.createAnswer();
+          await pcRef.current?.setLocalDescription(answer);
+          ws.send(JSON.stringify({ type: "answer", payload: answer,roomId }));
+          break;
+        case "answer":
+          await pcRef.current?.setRemoteDescription(data.payload);
+          break;
+        case "ice_candidate":
+            try {
+              await pcRef.current?.addIceCandidate(data.payload);
+            } catch (error) {
+              console.error(error);
+            }
+          break;
+          
+        case "peer_left":
+          console.log("peer left...")
+          break;
+
+      }
+      wsRef.current = ws;
+    }
+    
+    const ensurePeer = () => { 
+      if (pcRef.current) { 
+        return;
+      }
+      const pc = new RTCPeerConnection({iceServers});
+      
+      pc.onicecandidate = (evnt) => { 
+        if (evnt.candidate) { 
+          wsRef.current?.send(JSON.stringify({type:"ice_candidate",payload:evnt.candidate,roomId}))
+        }
+      }
+      
+      pc.ondatachannel = (evnt) => { 
+        console.log("data channel received");
+        bindChannel(evnt.channel);
+      }
+      
+      // create data channel , if u became offerer
+      const dc = pc.createDataChannel("data");
+      bindChannel(dc);
+      
+      pcRef.current = pc;
+    }
+    
+    const makeOffer = async () => {
+      const offer = await pcRef.current?.createOffer();
+      await pcRef.current?.setLocalDescription(offer);
+      wsRef.current?.send(JSON.stringify({type:"offer",payload:offer,roomId}))
+    }
+    const bindChannel = (ch) => {
+      dcRef.current = ch;
+      ch.onopen = () => {
+        console.log("data channel opened");
+        setConnected(true);
+      }
+      ch.onmessage = (evnt) => {
+        if (typeof evnt.data === "string") {
+          try {
+            const data = JSON.parse(evnt.data);
+            if (data.type === "meta") {
+              fileMeta.current = evnt.data;
+              receivedBuffer.current = [];
+              receivedSize.current = 0;
+              log(`Receiving file: ${data.name} (${data.size} bytes)`);
+            }
+            else if (data.type === "done") {
+              const blob = new Blob(receivedBuffer.current);
+              downloadFile(blob, fileMeta.current.name);
+              receivedBuffer.current = [];
+              receivedSize.current = 0;
+            }
+          } catch (e) {
+            console.log(e);
+          }
+        } else { 
+          // binary chunk
+          receivedBuffer.current.push(event.data);
+          receivedSize.current += event.data.byteLength;
+          
+          const pct = Math.round((receivedSize.current/fileMeta.current.size)*100);
+          setProgress(pct);
+        }
+      }
+      ch.onclose = () => {
+        console.log("data channel closed");
+      }
+    };
+    
+    const join = () => { 
+      connectWebsocket();
+      setInterval(() => {
+        wsRef.current?.send(JSON.stringify({ type: "join", roomId }));
+        log("join " + roomId);
+      },200)
+      
+    }
+    
+    const sendFile = async () => {
+      if (!file || !dcRef.current) { 
+        return;
+      }
+      const chunk = 64 * 1024; //64kb
+      dcRef.current.send(JSON.stringify({ type: "meta", name: file.name, size: file.size }));
+      
+      
+      let offset = 0;
+      while (offset < file.size) { 
+        const slice = file.slice(offset, offset + chunk);
+        const buffer = await slice.arrayBuffer();
+        dcRef.current.send(buffer);
+        offset += chunk;
+        
+        const pct = Math.round((offset/file.size)*100);
+        setProgress(pct);
+        await waitForBuffer();
+      }
+      dcRef.current.send(JSON.stringify({ type: "done" }));
+      log("File sent successfully");
+      
+    }
+    
+    const waitForBuffer = async () => {
+      await new Promise((res) => { 
+        const interval = setInterval(() => { 
+          if (dcRef.current?.bufferedAmount < 1e6) {
+            clearInterval(interval);
+            res();
+          }
+        },50)
+      })
+    }
+    
+    const downloadFile = (blob,name) => {
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = name;
+      a.click();
+      URL.revokeObjectURL(url);
+    };
+    
+    
+  }
 
   return (
-    <>
-      <div>
-        <a href="https://vite.dev" target="_blank">
-          <img src={viteLogo} className="logo" alt="Vite logo" />
-        </a>
-        <a href="https://react.dev" target="_blank">
-          <img src={reactLogo} className="logo react" alt="React logo" />
-        </a>
-      </div>
-      <h1>Vite + React</h1>
-      <div className="card">
-        <button onClick={() => setCount((count) => count + 1)}>
-          count is {count}
-        </button>
-        <p>
-          Edit <code>src/App.tsx</code> and save to test HMR
-        </p>
-      </div>
-      <p className="read-the-docs">
-        Click on the Vite and React logos to learn more
-      </p>
-    </>
+    <div className="p-6">
+         <h1 className="text-5xl text-green-500 text-center mb-5">PeerLink</h1>
+   
+         <div className="flex gap-2 justify-center mb-4">
+           <input
+             className="border px-2"
+             placeholder="Room ID"
+             value={roomId}
+             onChange={(e) => setRoomId(e.target.value)}
+           />
+           <button
+             className="bg-blue-600 text-white px-3"
+             onClick={join}
+           >
+             Join
+           </button>
+         </div>
+   
+         {connected && (
+           <div className="flex flex-col items-center gap-2">
+             <input
+               type="file"
+               onChange={(e) => setFile(e.target.files[0])}
+               className="mb-2"
+             />
+             <button
+               className="bg-green-600 text-white px-3"
+               onClick={sendFile}
+             >
+               Send File
+             </button>
+             <div className="w-1/2 bg-gray-300 h-3 rounded">
+               <div
+                 className="bg-green-500 h-3 rounded"
+                 style={{ width: `${progress}%` }}
+               ></div>
+             </div>
+           </div>
+         )}
+   
+         <div className="mt-6 border p-3 h-64 overflow-y-auto text-sm font-mono">
+           {logs.map((l, i) => (
+             <div key={i}>{l}</div>
+           ))}
+         </div>
+       </div>
   )
 }
 
