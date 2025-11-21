@@ -54,7 +54,21 @@ wss.on("connection", (ws: WebSocket) => {
             return;
           }
           broadCast(roomId, { type: "ice_candidate", payload }, ws);
-          break; 
+          break;
+          
+        case "offer":
+          if (!joinedRoom) {
+            return;
+          }
+          broadCast(roomId, { type: "offer", payload }, ws);
+          break;
+          
+        case "answer":
+          if (!joinedRoom) {
+            return;
+          }
+          broadCast(roomId, { type: "answer", payload }, ws);
+          break;
             
         case "leave":
           if (joinedRoom && rooms.has(roomId)) {
