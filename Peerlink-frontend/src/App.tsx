@@ -41,10 +41,13 @@ function App() {
       return;
     }
     const pc = new RTCPeerConnection({iceServers});
+    console.log("peer created");
+    console.log(pc);
     
     pc.onicecandidate = (evnt) => { 
       if (evnt.candidate) { 
         wsRef.current?.send(JSON.stringify({type:"ice_candidate",payload:evnt.candidate,roomId}))
+        console.log("ice candidate sent");
       }
     }
     
@@ -152,8 +155,10 @@ function App() {
       return;
     }
     const ws = new WebSocket("ws://localhost:3000");
+    wsRef.current = ws;
     ws.onopen = () => { 
       console.log("client is connected");
+      ws.send(JSON.stringify({ type: "join", roomId }));
     }
     
     ws.onmessage = async (event) => {
@@ -163,11 +168,8 @@ function App() {
       switch (data.type) { 
         case "joined":
           ensurePeer(); // if u joined first then u will wait for peer to join
-          if (data.peers === 2) { // if joined as second peer if have to send the offer
-            await makeOffer();
-          }
           break;
-        case "peer_joined": // you are the second guy joined in the room
+        case "peer_joined": 
           ensurePeer();
           await makeOffer();
           break;
@@ -199,13 +201,9 @@ function App() {
       wsRef.current = ws;
     }    
   }
-  const join = () => { 
+  const join = () => {
+    if(!roomId.trim()) return;
     connectWebsocket();
-    setInterval(() => {
-      wsRef.current?.send(JSON.stringify({ type: "join", roomId }));
-      logs("join " + roomId);
-    },200)
-    
   }
 
   return (
@@ -214,13 +212,13 @@ function App() {
     
           <div className="flex gap-2 justify-center mb-4">
             <input
-              className="border px-2"
+              className="border px-2 py-1 rounded"
               placeholder="Room ID"
               value={roomId}
               onChange={(e) => setRoomId(e.target.value)}
             />
             <button
-              className="bg-blue-600 text-white px-3"
+              className="bg-blue-600 text-white px-4 py-1 rounded hover:bg-blue-700"
               onClick={join}
             >
               Join
@@ -235,21 +233,25 @@ function App() {
                 className="mb-2"
               />
               <button
-                className="bg-green-600 text-white px-3"
+                className="bg-green-600 text-white px-4 py-1 rounded hover:bg-green-700"
                 onClick={sendFile}
+                disabled={!file}
               >
                 Send File
               </button>
               <div className="w-1/2 bg-gray-300 h-3 rounded">
                 <div
-                  className="bg-green-500 h-3 rounded"
+                  className="bg-green-500 h-3 rounded transition-all"
                   style={{ width: `${progress}%` }}
                 ></div>
               </div>
+              {progress > 0 && (
+                <div className="text-sm">{progress}%</div>
+              )}
             </div>
           )}
     
-          <div className="mt-6 border p-3 h-64 overflow-y-auto text-sm font-mono">
+          <div className="mt-6 border p-3 h-64 overflow-y-auto text-sm font-mono bg-gray-50 rounded">
             {log.map((l, i) => (
               <div key={i}>{l}</div>
             ))}

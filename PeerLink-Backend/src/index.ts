@@ -2,7 +2,6 @@ import express from 'express';
 import { WebSocketServer,WebSocket } from 'ws';
 import cors from 'cors';
 import http from "http";
-import { join } from 'path/win32';
 
 
 const app = express();
@@ -40,8 +39,8 @@ wss.on("connection", (ws: WebSocket) => {
         case "join":
           if (!rooms.get(roomId)) {
             rooms.set(roomId, new Set());
-            rooms.get(roomId)!.add(ws);
           }
+          rooms.get(roomId)!.add(ws);
           joinedRoom = roomId;
             
           ws.send(JSON.stringify({ type: "joined", roomId }));
