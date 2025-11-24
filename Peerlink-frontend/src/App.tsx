@@ -1,4 +1,5 @@
 import { useRef, useState } from "react";
+import { getProgress, saveProgress } from "./ProgressDB";
 
 const iceServers = [
   { urls: "stun:stun.l.google.com:19302" },
@@ -12,7 +13,8 @@ const iceServers = [
 type FileMeta = {
   name: string;
   size: number;
-} | null;;
+  totalChunks: number;
+} | null;
 
 type log = string;
 
@@ -30,6 +32,7 @@ function App() {
   const receivedBuffer = useRef<ArrayBuffer[]>([]);
   const receivedSize = useRef<number>(0);
   const fileMeta = useRef<FileMeta>(null);
+  const lastReceivedChunk = useRef<number>(-1);
   
   const logs = (m: string) => { 
     setLog((p) => [...p, m]);
@@ -74,15 +77,21 @@ function App() {
       console.log("data channel opened");
       setConnected(true);
     }
-    ch.onmessage = (evnt) => {
+    ch.onmessage = async(evnt) => {
       if (typeof evnt.data === "string") {
         try {
           const data = JSON.parse(evnt.data);
           if (data.type === "meta") {
-            fileMeta.current = {name:data.name,size:data.size};
-            receivedBuffer.current = [];
+            fileMeta.current = { name: data.name, size: data.size, totalChunks: data.totalChunks };
+            receivedBuffer.current = new Array(data.totalChunks);
             receivedSize.current = 0;
-            logs(`Receiving file: ${data.name} (${data.size} bytes)`);
+            const saved = await getProgress(roomId);
+            if (saved) {
+              lastReceivedChunk.current = saved;
+              dcRef.current?.send(JSON.stringify({ type: "resume_req", fromIndex: saved + 1 }))
+              logs(`Resuming from chunk ${saved + 1}`);
+            }
+            logs(`Receiving file: ${data.name}`);
           }
           else if (data.type === "done") {
             const blob = new Blob(receivedBuffer.current);
@@ -95,10 +104,22 @@ function App() {
         }
       } else { 
         // binary chunk
-        receivedBuffer.current.push(evnt.data);
+        const nextIndex = lastReceivedChunk.current + 1;
+        receivedBuffer.current[nextIndex] = evnt.data;
+        lastReceivedChunk.current = nextIndex;
+        
+        await saveProgress(roomId, nextIndex);
+        
         receivedSize.current += evnt.data.byteLength;
-        const pct = Math.round((receivedSize.current/fileMeta.current!.size)*100);
+        
+        const pct = Math.round(
+            (receivedSize.current / fileMeta.current!.size) * 100
+        );
         setProgress(pct);
+        
+        dcRef.current?.send(JSON.stringify({ type: "ack", chunk: nextIndex }));
+        
+
       }
     }
     ch.onclose = () => {
@@ -111,35 +132,52 @@ function App() {
       return;
     }
     const chunk = 64 * 1024; //64kb
-    dcRef.current.send(JSON.stringify({ type: "meta", name: file.name, size: file.size }));
+    const totalChunks = Math.ceil(file.size / chunk);
+    let currentChunk = 0;
     
+    dcRef.current.send(JSON.stringify({ type: "meta", name: file.name, size: file.size,totalChunks }));
     
-    let offset = 0;
-    while (offset < file.size) { 
-      const slice = file.slice(offset, offset + chunk);
+    const sendChunk = async () => { 
+      const start = currentChunk * chunk;
+      const end = start + chunk;
+      const slice = file.slice(start, end);
       const buffer = await slice.arrayBuffer();
-      dcRef.current.send(buffer);
-      offset += chunk;
-      
-      const pct = Math.round((offset/file.size)*100);
-      setProgress(pct);
-      await waitForBuffer();
+      dcRef.current?.send(buffer);
     }
-    dcRef.current.send(JSON.stringify({ type: "done" }));
-    logs("File sent successfully");
+    
+    dcRef.current.onmessage = (evnt) => { 
+      try {
+        const msg = JSON.parse(evnt.data);
+        if (msg.type === "ack") {
+          currentChunk = msg.index + 1;
+          setProgress(Math.round((currentChunk / totalChunks) * 100));
+          if (currentChunk < totalChunks) {
+            sendChunk();
+          }
+        }
+        else { 
+          dcRef.current?.send(JSON.stringify({type:"done"}))
+          logs("File sent successfully")
+        }
+      } catch (error) { 
+        console.error(error);
+      }
+      
+    }
+    sendChunk();
     
   }
   
-  const waitForBuffer = async () => {
-    await new Promise<void>((res) => { 
-      const interval = setInterval(() => { 
-        if (dcRef.current && dcRef.current?.bufferedAmount < 1e6) {
-          clearInterval(interval);
-          res();
-        }
-      },50)
-    })
-  }
+  // const waitForBuffer = async () => {
+  //   await new Promise<void>((res) => { 
+  //     const interval = setInterval(() => { 
+  //       if (dcRef.current && dcRef.current?.bufferedAmount < 1e6) {
+  //         clearInterval(interval);
+  //         res();
+  //       }
+  //     },50)
+  //   })
+  // }
   
   const downloadFile = (blob:Blob,name:string) => {
     const url = URL.createObjectURL(blob);
@@ -169,7 +207,7 @@ function App() {
         case "joined":
           ensurePeer(); // if u joined first then u will wait for peer to join
           break;
-        case "peer_joined": 
+        case "peer_joined":
           ensurePeer();
           await makeOffer();
           break;
