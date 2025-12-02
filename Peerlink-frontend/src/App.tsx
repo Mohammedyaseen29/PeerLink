@@ -117,7 +117,7 @@ function App() {
         );
         setProgress(pct);
         
-        dcRef.current?.send(JSON.stringify({ type: "ack", chunk: nextIndex }));
+        dcRef.current?.send(JSON.stringify({ type: "ack", index: nextIndex }));
         
 
       }
