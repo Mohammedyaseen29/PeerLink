@@ -9,6 +9,7 @@ export type FileMetadata = {
   fileId: string;
   roomId: string;
   name: string;
+  path?: string;
   size: number;
   totalChunks: number;
   receivedChunks: number;
@@ -40,9 +41,6 @@ export async function openDB():Promise<IDBDatabase>{
         const fileStore = db.createObjectStore(FILE_STORE, { keyPath: "fileId" });
       }
       
-      if(!db.objectStoreNames.contains(PROGRESS_STORE)) {
-        const progressStore = db.createObjectStore(PROGRESS_STORE, { keyPath: "fileId" });
-      }
       
       if (oldVersion < 2) { 
         if(db.objectStoreNames.contains(PROGRESS_STORE)) {
@@ -191,3 +189,61 @@ export const streamFileToDownload = async (
   a.click();
   URL.revokeObjectURL(url);
 };
+
+export async function getFilesInRoom(roomId: string): Promise<FileMetadata[]> {
+  const db = await openDB();
+  const tx = db.transaction(FILE_STORE, "readonly");
+  const store = tx.objectStore(FILE_STORE);
+
+  const req = store.getAll();
+
+  return new Promise((resolve, reject) => {
+    req.onsuccess = () => {
+      const all = req.result as FileMetadata[];
+      resolve(all.filter(f => f.roomId === roomId));
+    };
+    req.onerror = () => reject(req.error);
+  });
+}
+
+
+export async function deleteFile(fileId: string): Promise<void> {
+  const db = await openDB();
+
+  // Delete metadata
+  const tx1 = db.transaction(FILE_STORE, "readwrite");
+  tx1.objectStore(FILE_STORE).delete(fileId);
+
+  await new Promise<void>((resolve, reject) => {
+    tx1.oncomplete = () => resolve();
+    tx1.onerror = () => reject(tx1.error);
+  });
+
+  // Delete all chunks
+  const tx2 = db.transaction(CHUNK_STORE, "readwrite");
+  const store = tx2.objectStore(CHUNK_STORE);
+  const index = store.index("fileId");
+
+  const cursorReq = index.openCursor(IDBKeyRange.only(fileId));
+
+  cursorReq.onsuccess = () => {
+    const cursor = cursorReq.result;
+    if (cursor) {
+      cursor.delete();
+      cursor.continue();
+    }
+  };
+
+  await new Promise<void>((resolve, reject) => {
+    tx2.oncomplete = () => resolve();
+    tx2.onerror = () => reject(tx2.error);
+  });
+}
+
+
+export async function clearRoom(roomId: string): Promise<void> {
+  const files = await getFilesInRoom(roomId);
+  for (const file of files) {
+    await deleteFile(file.fileId);
+  }
+}
