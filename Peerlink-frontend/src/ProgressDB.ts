@@ -11,6 +11,7 @@ export type FileMetadata = {
   name: string;
   path?: string;
   size: number;
+  mimeType: string;
   totalChunks: number;
   receivedChunks: number;
   status: "receiving" | "complete" | "paused";
@@ -179,9 +180,9 @@ export const streamFileToDownload = async (
       onProgress(Math.round(((i + 1) / metadata.totalChunks) * 100));
     }
   }
-
+  
   // create final Blob and download it
-  const blob = new Blob(chunks);
+  const blob = new Blob(chunks,{type:metadata.mimeType});
   const url = URL.createObjectURL(blob);
   const a = document.createElement("a");
   a.href = url;

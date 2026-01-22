@@ -33,8 +33,6 @@ wss.on("connection", (ws: WebSocket) => {
       const data = JSON.parse(message.toString());
       const { roomId, type, payload } = data;
         
-    
-        
       switch (type) {
         case "join":
           if (!rooms.get(roomId)) {
