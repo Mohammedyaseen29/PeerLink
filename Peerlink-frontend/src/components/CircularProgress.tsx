@@ -1,3 +1,12 @@
+interface CircularProgressProps {
+    progress: number;
+    size?: number;
+    strokeWidth?: number;
+    className?: string;
+    showPercentage?: boolean;
+    status?: 'sending' | 'receiving' | 'paused' | 'pending' | 'sent' | 'failed' ;
+}
+
 export function CircularProgress({
     progress,
     size = 52,
@@ -5,13 +14,11 @@ export function CircularProgress({
     className = "",
     showPercentage = true,
     status = "sending",
-}: CircularProgressProps) {
-    // 1. We create a slightly larger SVG area so the stroke never touches the "walls"
+}:CircularProgressProps) {
     const margin = 4; 
     const svgSize = size + margin;
     const center = svgSize / 2;
     
-    // 2. The radius stays based on the original intended size
     const radius = (size - strokeWidth) / 2;
     const circumference = radius * 2 * Math.PI;
     const offset = circumference - (progress / 100) * circumference;

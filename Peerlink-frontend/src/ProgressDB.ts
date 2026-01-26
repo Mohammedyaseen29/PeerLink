@@ -17,12 +17,6 @@ export type FileMetadata = {
   createdAt: number;
 };
 
-type ChunkData = {
-  fileId: string;
-  chunkIndex: number;
-  data: ArrayBuffer;
-};
-
 export async function openDB(): Promise<IDBDatabase> { 
   return new Promise((resolve, reject) => { 
     const request = indexedDB.open(DB_NAME, DB_VERSION);
@@ -34,10 +28,6 @@ export async function openDB(): Promise<IDBDatabase> {
       if (!db.objectStoreNames.contains(CHUNK_STORE)) { 
         const chunkStore = db.createObjectStore(CHUNK_STORE, { keyPath: ["fileId", "chunkIndex"] });
         chunkStore.createIndex("fileId", "fileId", {unique: false});
-      }
-      
-      if (!db.objectStoreNames.contains(FILE_STORE)) {
-        const fileStore = db.createObjectStore(FILE_STORE, { keyPath: "fileId" });
       }
       
       if (oldVersion < 2) { 

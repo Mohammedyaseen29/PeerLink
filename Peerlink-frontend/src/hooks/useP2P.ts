@@ -394,7 +394,7 @@ export function useP2P() {
 
         setRoomId(newRoomId);
 
-        const ws = new WebSocket("ws://localhost:3000");
+        const ws = new WebSocket(import.meta.env.VITE_SIGNALING_SERVER_URL);
         wsRef.current = ws;
 
         ws.onopen = () => {
