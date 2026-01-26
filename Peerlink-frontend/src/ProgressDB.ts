@@ -1,10 +1,9 @@
-
-
 export const DB_NAME = "PeerLink_files";
 export const DB_VERSION = 2;
 export const CHUNK_STORE = "chunks";
 export const PROGRESS_STORE = "progress";
 export const FILE_STORE = "files"
+
 export type FileMetadata = {
   fileId: string;
   roomId: string;
@@ -24,9 +23,7 @@ type ChunkData = {
   data: ArrayBuffer;
 };
 
-
-
-export async function openDB():Promise<IDBDatabase>{ 
+export async function openDB(): Promise<IDBDatabase> { 
   return new Promise((resolve, reject) => { 
     const request = indexedDB.open(DB_NAME, DB_VERSION);
     
@@ -36,17 +33,15 @@ export async function openDB():Promise<IDBDatabase>{
       
       if (!db.objectStoreNames.contains(CHUNK_STORE)) { 
         const chunkStore = db.createObjectStore(CHUNK_STORE, { keyPath: ["fileId", "chunkIndex"] });
-        
         chunkStore.createIndex("fileId", "fileId", {unique: false});
       }
       
-      if(!db.objectStoreNames.contains(FILE_STORE)) {
+      if (!db.objectStoreNames.contains(FILE_STORE)) {
         const fileStore = db.createObjectStore(FILE_STORE, { keyPath: "fileId" });
       }
       
-      
       if (oldVersion < 2) { 
-        if(db.objectStoreNames.contains(PROGRESS_STORE)) {
+        if (db.objectStoreNames.contains(PROGRESS_STORE)) {
           try {
             db.deleteObjectStore(PROGRESS_STORE);
           } catch (error) { 
@@ -54,24 +49,24 @@ export async function openDB():Promise<IDBDatabase>{
           }
         }
       }
-      
-      
     }
+    
     request.onsuccess = () => { 
       resolve(request.result);
     }
+    
     request.onerror = () => { 
-      reject(request.result);
+      reject(request.error);
     }
   })
 }
 
-
-export async function saveChunk(fileId:string, chunkIndex:number, data:ArrayBuffer):Promise<void>{
+export async function saveChunk(fileId: string, chunkIndex: number, data: ArrayBuffer): Promise<void> {
   const db = await openDB();
   const tx = db.transaction(CHUNK_STORE, "readwrite");
   const store = tx.objectStore(CHUNK_STORE);
   store.put({fileId, chunkIndex, data});
+  
   return new Promise((resolve, reject) => { 
     tx.oncomplete = () => {
       resolve();
@@ -82,14 +77,13 @@ export async function saveChunk(fileId:string, chunkIndex:number, data:ArrayBuff
   })
 }
 
-export async function saveMetaData(metaData: FileMetadata):Promise<void> { 
+export async function saveMetaData(metaData: FileMetadata): Promise<void> { 
   const db = await openDB();
   const tx = db.transaction(FILE_STORE, "readwrite");
   const store = tx.objectStore(FILE_STORE);
-  
   store.put(metaData);
   
-  return new Promise((resolve,reject) => {
+  return new Promise((resolve, reject) => {
     tx.oncomplete = () => {
       resolve();
     }
@@ -99,15 +93,13 @@ export async function saveMetaData(metaData: FileMetadata):Promise<void> {
   })
 }
 
-
-export async function getMetaData(fileId:string):Promise<FileMetadata | null> { 
+export async function getMetaData(fileId: string): Promise<FileMetadata | null> { 
   const db = await openDB();
   const tx = db.transaction(FILE_STORE, "readonly");
   const store = tx.objectStore(FILE_STORE);
-  
   const request = store.get(fileId);
   
-  return new Promise((resolve,reject) => {
+  return new Promise((resolve, reject) => {
     request.onsuccess = () => {
       resolve(request.result || null);
     }
@@ -117,7 +109,11 @@ export async function getMetaData(fileId:string):Promise<FileMetadata | null> {
   })
 }
 
-export const updateFileProgress = async (fileId: string,receivedChunks: number,status?: FileMetadata["status"]): Promise<void> => {
+export const updateFileProgress = async (
+  fileId: string,
+  receivedChunks: number,
+  status?: FileMetadata["status"]
+): Promise<void> => {
   const metadata = await getMetaData(fileId);
   if (!metadata) return;
 
@@ -184,7 +180,7 @@ export const streamFileToDownload = async (
   }
   
   // create final Blob and download it
-  const blob = new Blob(chunks,{type:metadata.mimeType});
+  const blob = new Blob(chunks, {type: metadata.mimeType});
   const url = URL.createObjectURL(blob);
   const a = document.createElement("a");
   a.href = url;
@@ -208,7 +204,6 @@ export async function getFilesInRoom(roomId: string): Promise<FileMetadata[]> {
     req.onerror = () => reject(req.error);
   });
 }
-
 
 export async function deleteFile(fileId: string): Promise<void> {
   const db = await openDB();
@@ -243,41 +238,116 @@ export async function deleteFile(fileId: string): Promise<void> {
   });
 }
 
-
-export async function getUpdatePreviewUrl(fileId:string,metaData:FileMetadata){
-  try{
+export async function getUpdatePreviewUrl(
+  fileId: string,
+  metadata: FileMetadata,
+  previewBlob: string | null
+): Promise<string> {
+  try {
     const db = await openDB();
     const chunks: ArrayBuffer[] = [];
     
-        for (let i = 0; i < metadata.receivedChunks; i++) {
-          const tx = db.transaction("chunks", "readonly");
-          const store = tx.objectStore("chunks");
-          const req = store.get([fileId, i]);
-    
-          const chunk = await new Promise<ArrayBuffer>((resolve, reject) => {
-            req.onsuccess = () => {
-              if (req.result) resolve(req.result.data);
-              else reject(new Error(`Chunk ${i} missing`));
-            };
-            req.onerror = () => reject(req.error);
-          });
-    
-          chunks.push(chunk);
-        }
-    
-        const blob = new Blob(chunks, { type: metadata.mimeType });
+    for (let i = 0; i < metadata.receivedChunks; i++) {
+      const tx = db.transaction(CHUNK_STORE, "readonly");
+      const store = tx.objectStore(CHUNK_STORE);
+      const req = store.get([fileId, i]);
 
-        const url = URL.createObjectURL(blob);
+      const chunk = await new Promise<ArrayBuffer>((resolve, reject) => {
+        req.onsuccess = () => {
+          if (req.result) resolve(req.result.data);
+          else reject(new Error(`Chunk ${i} missing`));
+        };
+        req.onerror = () => reject(req.error);
+      });
+
+      chunks.push(chunk);
+    }
+
+    const blob = new Blob(chunks, { type: metadata.mimeType });
+    const url = URL.createObjectURL(blob);
+
+    if (previewBlob) {
+      URL.revokeObjectURL(previewBlob);
+    }
     
-        if (previewBlob) {
-          URL.revokeObjectURL(previewBlob);
-        }
-        return url;
-  } catch(err){
+    return url;
+  } catch (err) {
     console.error("Preview update failed:", err);
+    throw err;
   }
 } 
 
+export async function savePartialSendState(
+  roomId: string,
+  fileName: string,
+  fileSize: number,
+  lastSentChunk: number,
+  totalChunks: number
+): Promise<void> {
+  const db = await openDB();
+  const tx = db.transaction(FILE_STORE, "readwrite");
+  const store = tx.objectStore(FILE_STORE);
+  
+  const sendStateId = `send_${roomId}_${fileName}_${fileSize}`;
+  store.put({
+    fileId: sendStateId,
+    roomId: roomId,
+    name: fileName,
+    size: fileSize,
+    mimeType: "send_state",
+    totalChunks: totalChunks,
+    receivedChunks: lastSentChunk + 1,
+    status: "paused" as const,
+    createdAt: Date.now(),
+  });
+
+  return new Promise((resolve, reject) => {
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+  });
+}
+
+export async function getPartialSendState(
+  roomId: string,
+  fileName: string,
+  fileSize: number
+): Promise<number> {
+  const db = await openDB();
+  const tx = db.transaction(FILE_STORE, "readonly");
+  const store = tx.objectStore(FILE_STORE);
+  
+  const sendStateId = `send_${roomId}_${fileName}_${fileSize}`;
+  const request = store.get(sendStateId);
+
+  return new Promise((resolve, reject) => {
+    request.onsuccess = () => {
+      if (request.result && request.result.mimeType === "send_state") {
+        resolve(request.result.receivedChunks - 1);
+      } else {
+        resolve(-1);
+      }
+    };
+    request.onerror = () => reject(request.error);
+  });
+}
+
+export async function clearPartialSendState(
+  roomId: string,
+  fileName: string,
+  fileSize: number
+): Promise<void> {
+  const db = await openDB();
+  const tx = db.transaction(FILE_STORE, "readwrite");
+  const store = tx.objectStore(FILE_STORE);
+  
+  const sendStateId = `send_${roomId}_${fileName}_${fileSize}`;
+  store.delete(sendStateId);
+
+  return new Promise((resolve, reject) => {
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+  });
+}
 
 export async function clearRoom(roomId: string): Promise<void> {
   const files = await getFilesInRoom(roomId);
