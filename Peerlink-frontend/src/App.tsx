@@ -30,7 +30,7 @@ const iceServers = [
 type QueuedFile = {
   file: File;
   id: string;
-  status: "pending" | "sending" | "sent" | "failed";
+  status: "pending" | "sending" | "sent" | "failed" | "paused";
   progress: number;
 };
 
@@ -44,6 +44,8 @@ function App() {
   const [receivedFiles, setReceivedFiles] = useState<FileMetadata[]>([]);
   const [currentReceiving, setCurrentReceiving] = useState<string | null>(null);
   const [receiveProgress, setReceiveProgress] = useState(0);
+  const [previewFile, setPreviewFile] = useState<FileMetadata | null>(null);
+  const [previewBlob, setPreviewBlob] = useState<string | null>(null);
 
   const wsRef = useRef<WebSocket | null>(null);
   const pcRef = useRef<RTCPeerConnection | null>(null);
@@ -54,6 +56,7 @@ function App() {
   const sendingFile = useRef<QueuedFile | null>(null);
   const currentChunkToSend = useRef<number>(0);
   const fileReaderRef = useRef<FileReader>(new FileReader());
+  const pausedFileRef = useRef<QueuedFile | null>(null);
 
   useEffect(() => {
     const loadReceivedFiles = async () => {
@@ -232,6 +235,19 @@ function App() {
             sendNextChunk();
           }
           break;
+
+        case "pause_req":
+          if (sendingFile.current) {
+            pausedFileRef.current = sendingFile.current;
+            setSendQueue((prev) =>
+              prev.map((f) =>
+                f.id === sendingFile.current?.id ? { ...f, status: "paused" } : f,
+              ),
+            );
+            sendingFile.current = null;
+            logs(`⏸ Paused sending`);
+          }
+          break;
       }
     } catch (e) {
       console.log(e);
@@ -253,6 +269,11 @@ function App() {
     );
     setReceiveProgress(progress);
     dcRef.current?.send(JSON.stringify({ type: "ack", chunk: nextIndex }));
+
+    // Update preview if this file is being previewed
+    if (previewFile && previewFile.fileId === currentFileId.current) {
+      updatePreview(currentFileId.current, currentMeta.current);
+    }
   };
 
   const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -311,6 +332,50 @@ function App() {
     fileReaderRef.current.readAsArrayBuffer(slice);
   };
 
+  const pauseSending = (fileId: string) => {
+    const file = sendQueue.find((f) => f.id === fileId);
+    if (file && file.status === "sending") {
+      dcRef.current?.send(JSON.stringify({ type: "pause_req" }));
+      pausedFileRef.current = file;
+      setSendQueue((prev) =>
+        prev.map((f) => (f.id === fileId ? { ...f, status: "paused" } : f)),
+      );
+      sendingFile.current = null;
+      logs(`⏸ Paused: ${file.file.name}`);
+    }
+  };
+
+  const resumeSending = (fileId: string) => {
+    const file = sendQueue.find((f) => f.id === fileId);
+    if (file && file.status === "paused") {
+      setSendQueue((prev) =>
+        prev.map((f) => (f.id === fileId ? { ...f, status: "pending" } : f)),
+      );
+      logs(`▶ Resumed: ${file.file.name}`);
+    }
+  };
+
+  const removeFromQueue = (fileId: string) => {
+    const file = sendQueue.find((f) => f.id === fileId);
+    if (file) {
+      if (file.status === "sending") {
+        dcRef.current?.send(JSON.stringify({ type: "pause_req" }));
+        sendingFile.current = null;
+      }
+      setSendQueue((prev) => prev.filter((f) => f.id !== fileId));
+      logs(`✗ Removed: ${file.file.name}`);
+    }
+  };
+
+  const clearAllQueue = () => {
+    if (sendingFile.current) {
+      dcRef.current?.send(JSON.stringify({ type: "pause_req" }));
+      sendingFile.current = null;
+    }
+    setSendQueue([]);
+    logs("Cleared all files from queue");
+  };
+
   const downloadFile = async (file: FileMetadata) => {
     try {
       logs(`Downloading: ${file.name}`);
@@ -322,6 +387,65 @@ function App() {
       logs(`✗ Error downloading ${file.name}`);
       console.error(error);
     }
+  };
+
+  const updatePreview = async (fileId: string, metadata: FileMetadata) => {
+    try {
+      const db = await (await import("./ProgressDB")).openDB();
+      const chunks: ArrayBuffer[] = [];
+
+      // Read available chunks
+      for (let i = 0; i < metadata.receivedChunks; i++) {
+        const tx = db.transaction("chunks", "readonly");
+        const store = tx.objectStore("chunks");
+        const req = store.get([fileId, i]);
+
+        const chunk = await new Promise<ArrayBuffer>((resolve, reject) => {
+          req.onsuccess = () => {
+            if (req.result) resolve(req.result.data);
+            else reject(new Error(`Chunk ${i} not found`));
+          };
+          req.onerror = () => reject(req.error);
+        });
+
+        chunks.push(chunk);
+      }
+
+      const blob = new Blob(chunks, { type: metadata.mimeType });
+      const url = URL.createObjectURL(blob);
+      
+      // Revoke old blob URL
+      if (previewBlob) {
+        URL.revokeObjectURL(previewBlob);
+      }
+      
+      setPreviewBlob(url);
+    } catch (error) {
+      console.error("Error updating preview:", error);
+    }
+  };
+
+  const openPreview = async (file: FileMetadata) => {
+    setPreviewFile(file);
+    await updatePreview(file.fileId, file);
+  };
+
+  const closePreview = () => {
+    if (previewBlob) {
+      URL.revokeObjectURL(previewBlob);
+    }
+    setPreviewFile(null);
+    setPreviewBlob(null);
+  };
+
+  const isPreviewable = (mimeType: string) => {
+    return (
+      mimeType.startsWith("image/") ||
+      mimeType.startsWith("video/") ||
+      mimeType.startsWith("audio/") ||
+      mimeType === "application/pdf" ||
+      mimeType.startsWith("text/")
+    );
   };
 
   const formatBytes = (bytes: number) => {
@@ -443,13 +567,6 @@ function App() {
             </div>
           </div>
 
-          {/*<button
-            className="bg-green-600 text-white px-6 py-2 rounded-lg hover:bg-green-700 disabled:bg-gray-400 disabled:cursor-not-allowed transition"
-            onClick={startSending}
-            disabled={sendingFile.current !== null}
-          >
-            {sendingFile.current ? "Sending..." : "Start Transfer"}
-          </button>*/}
           {/* Send Queue Display */}
           {sendQueue.length > 0 && (
             <div className="w-full max-w-2xl">
@@ -460,10 +577,10 @@ function App() {
                   {sendQueue.length})
                 </h3>
                 <button
-                  onClick={() => setSendQueue([])}
+                  onClick={clearAllQueue}
                   className="text-sm text-red-600 hover:text-red-800"
                 >
-                  Clear Queue
+                  Clear All
                 </button>
               </div>
               <div className="space-y-2 max-h-64 overflow-y-auto">
@@ -472,7 +589,7 @@ function App() {
                     key={f.id}
                     className="border rounded p-2 bg-white shadow-sm"
                   >
-                    <div className="flex justify-between">
+                    <div className="flex justify-between items-start">
                       <div className="flex-1">
                         <span className="text-sm font-medium">
                           {f.file.name}
@@ -483,9 +600,36 @@ function App() {
                           </div>
                         )}
                       </div>
-                      <span className="text-xs ml-2">
-                        {formatBytes(f.file.size)}
-                      </span>
+                      <div className="flex items-center gap-2">
+                        <span className="text-xs">{formatBytes(f.file.size)}</span>
+                        {f.status === "sending" && (
+                          <button
+                            onClick={() => pauseSending(f.id)}
+                            className="text-orange-600 hover:text-orange-800 text-xs px-2 py-1"
+                            title="Pause"
+                          >
+                            ⏸
+                          </button>
+                        )}
+                        {f.status === "paused" && (
+                          <button
+                            onClick={() => resumeSending(f.id)}
+                            className="text-green-600 hover:text-green-800 text-xs px-2 py-1"
+                            title="Resume"
+                          >
+                            ▶
+                          </button>
+                        )}
+                        {f.status !== "sent" && (
+                          <button
+                            onClick={() => removeFromQueue(f.id)}
+                            className="text-red-600 hover:text-red-800 text-xs px-2 py-1"
+                            title="Remove"
+                          >
+                            ✕
+                          </button>
+                        )}
+                      </div>
                     </div>
                     <div className="w-full bg-gray-200 h-2 rounded mt-1">
                       <div
@@ -494,7 +638,9 @@ function App() {
                             ? "bg-green-500"
                             : f.status === "sending"
                               ? "bg-blue-500"
-                              : "bg-gray-400"
+                              : f.status === "paused"
+                                ? "bg-orange-500"
+                                : "bg-gray-400"
                         }`}
                         style={{ width: `${f.progress}%` }}
                       />
@@ -502,7 +648,9 @@ function App() {
                     <div className="text-xs text-gray-500 capitalize mt-1">
                       {f.status === "sending"
                         ? `${f.progress}% - Sending...`
-                        : f.status}
+                        : f.status === "paused"
+                          ? `${f.progress}% - Paused`
+                          : f.status}
                     </div>
                   </div>
                 ))}
@@ -511,7 +659,7 @@ function App() {
           )}
 
           {/* Received Files Display */}
-          <div className="mt-4 w-full">
+          <div className="mt-4 w-full max-w-2xl">
             <h3 className="font-bold mb-2">Received Files</h3>
             {currentReceiving && (
               <div className="mb-2 p-2 bg-blue-50 rounded">
@@ -528,7 +676,7 @@ function App() {
               {receivedFiles.map((file) => (
                 <div key={file.fileId} className="border rounded p-2">
                   <div className="flex justify-between items-center">
-                    <div>
+                    <div className="flex-1">
                       <div className="text-sm font-medium">{file.name}</div>
                       {file.path && (
                         <div className="text-xs text-gray-500">{file.path}</div>
@@ -537,20 +685,102 @@ function App() {
                     <span className="text-xs">{formatBytes(file.size)}</span>
                   </div>
                   {file.status === "complete" ? (
-                    <button
-                      onClick={() => downloadFile(file)}
-                      className="mt-2 bg-indigo-600 text-white px-3 py-1 rounded text-sm w-full"
-                    >
-                      Download
-                    </button>
+                    <div className="flex gap-2 mt-2">
+                      <button
+                        onClick={() => downloadFile(file)}
+                        className="bg-indigo-600 text-white px-3 py-1 rounded text-sm flex-1"
+                      >
+                        Download
+                      </button>
+                      {isPreviewable(file.mimeType) && (
+                        <button
+                          onClick={() => openPreview(file)}
+                          className="bg-green-600 text-white px-3 py-1 rounded text-sm"
+                        >
+                          👁 Preview
+                        </button>
+                      )}
+                    </div>
                   ) : (
-                    <div className="text-xs text-blue-600 mt-1">
-                      Receiving... {file.receivedChunks}/{file.totalChunks}{" "}
-                      chunks
+                    <div>
+                      <div className="text-xs text-blue-600 mt-1">
+                        Receiving... {file.receivedChunks}/{file.totalChunks} chunks
+                      </div>
+                      {isPreviewable(file.mimeType) && file.receivedChunks > 0 && (
+                        <button
+                          onClick={() => openPreview(file)}
+                          className="mt-2 bg-green-600 text-white px-3 py-1 rounded text-sm w-full"
+                        >
+                          👁 Preview (Partial)
+                        </button>
+                      )}
                     </div>
                   )}
                 </div>
               ))}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Preview Modal */}
+      {previewFile && (
+        <div className="fixed inset-0 bg-black bg-opacity-75 flex items-center justify-center z-50 p-4">
+          <div className="bg-white rounded-lg max-w-4xl max-h-[90vh] w-full flex flex-col">
+            <div className="flex justify-between items-center p-4 border-b">
+              <div>
+                <h3 className="font-bold">{previewFile.name}</h3>
+                <p className="text-xs text-gray-500">
+                  {previewFile.status === "complete"
+                    ? "Complete"
+                    : `${previewFile.receivedChunks}/${previewFile.totalChunks} chunks loaded`}
+                </p>
+              </div>
+              <button
+                onClick={closePreview}
+                className="text-2xl hover:text-red-600"
+              >
+                ✕
+              </button>
+            </div>
+            <div className="flex-1 overflow-auto p-4">
+              {previewBlob ? (
+                <>
+                  {previewFile.mimeType.startsWith("image/") && (
+                    <img
+                      src={previewBlob}
+                      alt={previewFile.name}
+                      className="max-w-full h-auto mx-auto"
+                    />
+                  )}
+                  {previewFile.mimeType.startsWith("video/") && (
+                    <video
+                      src={previewBlob}
+                      controls
+                      className="max-w-full h-auto mx-auto"
+                    />
+                  )}
+                  {previewFile.mimeType.startsWith("audio/") && (
+                    <audio src={previewBlob} controls className="w-full" />
+                  )}
+                  {previewFile.mimeType === "application/pdf" && (
+                    <iframe
+                      src={previewBlob}
+                      className="w-full h-[70vh]"
+                      title="PDF Preview"
+                    />
+                  )}
+                  {previewFile.mimeType.startsWith("text/") && (
+                    <iframe
+                      src={previewBlob}
+                      className="w-full h-[70vh] border"
+                      title="Text Preview"
+                    />
+                  )}
+                </>
+              ) : (
+                <div className="text-center py-10">Loading preview...</div>
+              )}
             </div>
           </div>
         </div>

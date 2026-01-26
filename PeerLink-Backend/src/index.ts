@@ -66,7 +66,6 @@ wss.on("connection", (ws: WebSocket) => {
           }
           broadCast(roomId, { type: "answer", payload }, ws);
           break;
-            
         case "leave":
           if (joinedRoom && rooms.has(roomId)) {
             rooms.get(roomId)?.delete(ws);

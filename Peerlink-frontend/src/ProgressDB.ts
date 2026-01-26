@@ -24,6 +24,8 @@ type ChunkData = {
   data: ArrayBuffer;
 };
 
+
+
 export async function openDB():Promise<IDBDatabase>{ 
   return new Promise((resolve, reject) => { 
     const request = indexedDB.open(DB_NAME, DB_VERSION);
@@ -240,6 +242,41 @@ export async function deleteFile(fileId: string): Promise<void> {
     tx2.onerror = () => reject(tx2.error);
   });
 }
+
+
+export async function getUpdatePreviewUrl(fileId:string,metaData:FileMetadata){
+  try{
+    const db = await openDB();
+    const chunks: ArrayBuffer[] = [];
+    
+        for (let i = 0; i < metadata.receivedChunks; i++) {
+          const tx = db.transaction("chunks", "readonly");
+          const store = tx.objectStore("chunks");
+          const req = store.get([fileId, i]);
+    
+          const chunk = await new Promise<ArrayBuffer>((resolve, reject) => {
+            req.onsuccess = () => {
+              if (req.result) resolve(req.result.data);
+              else reject(new Error(`Chunk ${i} missing`));
+            };
+            req.onerror = () => reject(req.error);
+          });
+    
+          chunks.push(chunk);
+        }
+    
+        const blob = new Blob(chunks, { type: metadata.mimeType });
+
+        const url = URL.createObjectURL(blob);
+    
+        if (previewBlob) {
+          URL.revokeObjectURL(previewBlob);
+        }
+        return url;
+  } catch(err){
+    console.error("Preview update failed:", err);
+  }
+} 
 
 
 export async function clearRoom(roomId: string): Promise<void> {
