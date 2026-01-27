@@ -19,18 +19,25 @@ export function RoomConnection({
     connectionType,
 }: RoomConnectionProps) {
     const [inputValue, setInputValue] = useState(roomId);
+    const [isWaiting, setIsWaiting] = useState(false);
 
     const handleJoin = () => {
-        if (inputValue.trim()) {
+        if (inputValue.trim() && !isWaiting && !connected) {
+            setIsWaiting(true);
             onJoin(inputValue.trim());
         }
     };
 
     const handleKeyPress = (e: React.KeyboardEvent) => {
-        if (e.key === "Enter") {
+        if (e.key === "Enter" && !isWaiting && !connected) {
             handleJoin();
         }
     };
+
+    // Reset waiting state when connected
+    if (connected && isWaiting) {
+        setIsWaiting(false);
+    }
 
     return (
         <div className="room-connection">
@@ -48,16 +55,31 @@ export function RoomConnection({
                             }}
                             onKeyPress={handleKeyPress}
                             className="room-input"
-                            disabled={connected}
+                            disabled={connected || isWaiting}
                         />
                     </div>
                     {!connected && (
-                        <button onClick={handleJoin} className="btn btn-primary join-btn">
+                        <button 
+                            onClick={handleJoin} 
+                            className="btn btn-primary join-btn"
+                            disabled={isWaiting || !inputValue.trim()}
+                        >
                             <LogIn size={18} />
-                            <span>Join</span>
+                            <span>{isWaiting ? "Joining..." : "Join"}</span>
                         </button>
                     )}
                 </div>
+
+                {isWaiting && !connected && (
+                    <p style={{ 
+                        color: 'var(--text-secondary)', 
+                        fontSize: '0.875rem', 
+                        marginTop: '0.5rem',
+                        textAlign: 'center'
+                    }}>
+                        Waiting for other peer to connect...
+                    </p>
+                )}
 
                 <ConnectionIndicator connected={connected} connectionType={connectionType} />
             </div>
