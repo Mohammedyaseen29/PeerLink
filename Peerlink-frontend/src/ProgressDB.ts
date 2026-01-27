@@ -1,5 +1,5 @@
 export const DB_NAME = "PeerLink_files";
-export const DB_VERSION = 2;
+export const DB_VERSION = 3;  
 export const CHUNK_STORE = "chunks";
 export const PROGRESS_STORE = "progress";
 export const FILE_STORE = "files"
@@ -25,11 +25,19 @@ export async function openDB(): Promise<IDBDatabase> {
       const db = request.result;
       const oldVersion = event.oldVersion ?? 0;
       
+      // Create CHUNK_STORE if it doesn't exist
       if (!db.objectStoreNames.contains(CHUNK_STORE)) { 
         const chunkStore = db.createObjectStore(CHUNK_STORE, { keyPath: ["fileId", "chunkIndex"] });
         chunkStore.createIndex("fileId", "fileId", {unique: false});
       }
       
+      // Create FILE_STORE if it doesn't exist - THIS WAS MISSING!
+      if (!db.objectStoreNames.contains(FILE_STORE)) {
+        const fileStore = db.createObjectStore(FILE_STORE, { keyPath: "fileId" });
+        fileStore.createIndex("roomId", "roomId", { unique: false });
+      }
+      
+      // Remove old PROGRESS_STORE if upgrading from version 1
       if (oldVersion < 2) { 
         if (db.objectStoreNames.contains(PROGRESS_STORE)) {
           try {
