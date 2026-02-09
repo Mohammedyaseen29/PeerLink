@@ -39,14 +39,30 @@ export function useP2P() {
 
     const wsRef = useRef<WebSocket | null>(null);
     const pcRef = useRef<RTCPeerConnection | null>(null);
-    const dcRef = useRef<RTCDataChannel | null>(null);
     const currentFileId = useRef<string | null>(null);
     const currentMeta = useRef<FileMetadata | null>(null);
     const lastReceivedChunk = useRef<number>(-1);
     const sendingFile = useRef<QueuedFile | null>(null);
-    const currentChunkToSend = useRef<number>(0);
-    const fileReaderRef = useRef<FileReader>(new FileReader());
+    const controlChannelRef = useRef<RTCDataChannel | null>(null);
+    const dataChannelRef = useRef<RTCDataChannel | null>(null);
     const receiveStartTime = useRef<number>(0);
+    const receiverAckBuffer = useRef<Set<number>>(new Set());
+    const ackTimerRef = useRef<number | null>(null);
+    const slidingWindow = useRef({
+      windowSize: 32,
+      maxWindowSize: 256, 
+      minWindowSize: 8,
+      inFlight: new Set<number>(), 
+      nextToSend: 0,
+      lastAcked: -1,
+      ackBitmap: new Map<number, boolean>() 
+    });
+    
+    const congestionControl = useRef({
+      rttSamples: [] as number[],
+      rttAvg: 100,
+      sentTimes: new Map<number, number>()
+    });
 
     const log = useCallback((message: string) => {
         setLogs((prev) => [...prev, message]);
@@ -97,31 +113,53 @@ export function useP2P() {
         });
     }, []);
 
-    const bindChannel = useCallback((ch: RTCDataChannel) => {
-        dcRef.current = ch;
-
+    const bindControlChannel = useCallback((ch: RTCDataChannel) => {
+        controlChannelRef.current = ch;
+    
         ch.onopen = () => {
-            console.log("Data channel opened");
+            console.log("✅ Control channel opened");
+        };
+    
+        ch.onmessage = async (event) => {
+            if (typeof event.data === "string") {
+                await handleControlMessage(event.data);
+            }
+        };
+    
+        ch.onclose = () => {
+            console.log("❌ Control channel closed");
+        };
+    }, []);
+    
+    const bindDataChannel = useCallback((ch: RTCDataChannel) => {
+        dataChannelRef.current = ch;
+    
+        ch.onopen = () => {
+            console.log("✅ Data channel opened");
             setConnected(true);
             if (pcRef.current) {
                 detectConnectionType(pcRef.current);
             }
         };
-
+    
         ch.onmessage = async (event) => {
-            if (typeof event.data === "string") {
-                await handleControlMessage(event.data);
-            } else {
+            if (event.data instanceof ArrayBuffer) {
                 await handleBinaryChunk(event.data);
             }
         };
-
+    
         ch.onclose = () => {
-            console.log("Data channel closed");
+            console.log("❌ Data channel closed");
             setConnected(false);
             setConnectionType("disconnected");
         };
-    }, []);
+        
+        ch.onbufferedamountlow = () => {
+            if (sendingFile.current) {
+                sendChunkBatch();
+            }
+        };
+    }, [detectConnectionType]);
 
     const handleControlMessage = async (data: string) => {
         try {
@@ -153,7 +191,7 @@ export function useP2P() {
                     const lastChunk = await getLastChunkIndex(fileId);
                     if (lastChunk !== null && lastChunk >= 0) {
                         lastReceivedChunk.current = lastChunk;
-                        dcRef.current?.send(
+                        controlChannelRef.current?.send(
                             JSON.stringify({ type: "resume_req", fromChunk: lastChunk + 1 })
                         );
                         log(`Resuming from chunk ${lastChunk + 1}`);
@@ -183,67 +221,109 @@ export function useP2P() {
                     }
                     break;
 
-                case "ack":
-                    if (sendingFile.current) {
-                        const ackedChunk = msg.chunk;
-                        currentChunkToSend.current = ackedChunk + 1;
-
-                        const totalChunks = Math.ceil(sendingFile.current.file.size / CHUNK_SIZE);
-                        const progress = Math.round((currentChunkToSend.current / totalChunks) * 100);
-                        const bytesTransferred = currentChunkToSend.current * CHUNK_SIZE;
-
-                        await savePartialSendState(
+                case "ack":{
+                  if (!sendingFile.current) break;
+                    
+                    const ackedChunks = msg.chunks as number[];  // Receive array of chunk indices
+                    const { inFlight, ackBitmap } = slidingWindow.current;
+                    let {lastAcked} = slidingWindow.current;
+                    
+                    // Process each ACK
+                    ackedChunks.forEach(chunkIdx => {
+                      inFlight.delete(chunkIdx);
+                      ackBitmap.set(chunkIdx, true);
+                      
+                      // Update RTT for congestion control
+                      const sentTime = congestionControl.current.sentTimes.get(chunkIdx);
+                      if (sentTime) {
+                        const rtt = Date.now() - sentTime;
+                        congestionControl.current.rttSamples.push(rtt);
+                        if (congestionControl.current.rttSamples.length > 10) {
+                          congestionControl.current.rttSamples.shift();
+                        }
+                        const avgRtt = congestionControl.current.rttSamples.reduce((a,b) => a+b, 0) / 
+                                       congestionControl.current.rttSamples.length;
+                        congestionControl.current.rttAvg = avgRtt;
+                        congestionControl.current.sentTimes.delete(chunkIdx);
+                      }
+                    });
+                    
+                    // Advance lastAcked window (find highest contiguous ACK)
+                    while (ackBitmap.get(lastAcked + 1)) {
+                      lastAcked++;
+                    }
+                    slidingWindow.current.lastAcked = lastAcked;
+                    
+                    adjustWindowSize();
+                    
+                    const totalChunks = Math.ceil(sendingFile.current.file.size / CHUNK_SIZE);
+                    const progress = Math.round(((lastAcked + 1) / totalChunks) * 100);
+                    const bytesTransferred = (lastAcked + 1) * CHUNK_SIZE;
+                    
+                    await savePartialSendState(
+                        roomId,
+                        sendingFile.current.file.name,
+                        sendingFile.current.file.size,
+                        lastAcked,
+                        totalChunks
+                    );
+                    
+                    setSendQueue((prev) =>
+                        prev.map((f) => {
+                            if (f.id === sendingFile.current?.id) {
+                                return {
+                                    ...f,
+                                    progress,
+                                    lastSentChunk: lastAcked,
+                                    bytesTransferred,
+                                };
+                            }
+                            return f;
+                        })
+                    );
+                    
+                    if (lastAcked + 1 >= totalChunks) {
+                        controlChannelRef.current?.send(JSON.stringify({ type: "done" }));
+                        log(`✓ Sent: ${sendingFile.current.file.name}`);
+                    
+                        await clearPartialSendState(
                             roomId,
                             sendingFile.current.file.name,
-                            sendingFile.current.file.size,
-                            ackedChunk,
-                            totalChunks
+                            sendingFile.current.file.size
                         );
-
+                    
                         setSendQueue((prev) =>
-                            prev.map((f) => {
-                                if (f.id === sendingFile.current?.id) {
-                                    return {
-                                        ...f,
-                                        progress,
-                                        lastSentChunk: ackedChunk,
-                                        bytesTransferred,
-                                    };
-                                }
-                                return f;
-                            })
+                            prev.map((f) =>
+                                f.id === sendingFile.current?.id
+                                    ? { ...f, status: "sent", progress: 100 }
+                                    : f
+                            )
                         );
-
-                        if (currentChunkToSend.current < totalChunks) {
-                            sendNextChunk();
-                        } else {
-                            dcRef.current?.send(JSON.stringify({ type: "done" }));
-                            log(`✓ Sent: ${sendingFile.current.file.name}`);
-
-                            await clearPartialSendState(
-                                roomId,
-                                sendingFile.current.file.name,
-                                sendingFile.current.file.size
-                            );
-
-                            setSendQueue((prev) =>
-                                prev.map((f) =>
-                                    f.id === sendingFile.current?.id
-                                        ? { ...f, status: "sent", progress: 100 }
-                                        : f
-                                )
-                            );
-                            sendingFile.current = null;
-                            processNextFileInQueue();
-                        }
+                        
+                        slidingWindow.current = {
+                            windowSize: 32,
+                            maxWindowSize: 256,
+                            minWindowSize: 8,
+                            inFlight: new Set(),
+                            nextToSend: 0,
+                            lastAcked: -1,
+                            ackBitmap: new Map()
+                        };
+                        
+                        sendingFile.current = null;
+                        processNextFileInQueue();
+                    } else {
+                        sendChunkBatch();
                     }
                     break;
+                }
+                    
 
                 case "resume_req":
                     if (sendingFile.current) {
-                        currentChunkToSend.current = msg.fromChunk;
+                        slidingWindow.current.nextToSend = msg.fromChunk;
                         log(`Resuming send from chunk ${msg.fromChunk}`);
-                        sendNextChunk();
+                        sendChunkBatch();
                     }
                     break;
 
@@ -278,53 +358,142 @@ export function useP2P() {
 
     const handleBinaryChunk = async (data: ArrayBuffer) => {
         if (!currentFileId.current || !currentMeta.current) return;
-
-        const nextIndex = lastReceivedChunk.current + 1;
-        await saveChunk(currentFileId.current, nextIndex, data);
-        lastReceivedChunk.current = nextIndex;
-        await updateFileProgress(currentFileId.current, nextIndex + 1);
-
-        const progress = Math.round(
-            ((nextIndex + 1) / currentMeta.current.totalChunks) * 100
-        );
-        const bytesReceived = (nextIndex + 1) * CHUNK_SIZE;
-
-        setCurrentReceiving((prev) =>
-            prev
-                ? {
-                    ...prev,
-                    progress,
-                    bytesReceived: Math.min(bytesReceived, currentMeta.current!.size),
-                }
-                : null
-        );
-
-        dcRef.current?.send(JSON.stringify({ type: "ack", chunk: nextIndex }));
+        const view = new DataView(data);
+        const chunkIndex = view.getUint32(0, true);
+        const chunkData = data.slice(4);
+        await saveChunk(currentFileId.current, chunkIndex, chunkData);
+        if (chunkIndex > lastReceivedChunk.current) {
+            lastReceivedChunk.current = chunkIndex;
+          }
+          
+          // Add to ACK buffer
+          receiverAckBuffer.current.add(chunkIndex);
+          
+          // Send batched ACK every 8 chunks OR every 50ms
+          if (receiverAckBuffer.current.size >= 32) {
+            sendBatchedAck();
+          } else if (!ackTimerRef.current) {
+            ackTimerRef.current = window.setTimeout(sendBatchedAck, 20);
+          }
+          
+          const progress = Math.round(
+              ((lastReceivedChunk.current + 1) / currentMeta.current.totalChunks) * 100
+          );
+          const bytesReceived = (lastReceivedChunk.current + 1) * CHUNK_SIZE;
+          
+          setCurrentReceiving((prev) =>
+              prev
+                  ? {
+                      ...prev,
+                      progress,
+                      bytesReceived: Math.min(bytesReceived, currentMeta.current!.size),
+                  }
+                  : null
+          );
+          
+        
     };
+    const sendBatchedAck = useCallback(() => {
+      if (receiverAckBuffer.current.size === 0) return;
+      
+      const chunks = Array.from(receiverAckBuffer.current);
+      controlChannelRef.current?.send(JSON.stringify({ 
+        type: "ack", 
+        chunks 
+      }));
+      
+      receiverAckBuffer.current.clear();
+      if (ackTimerRef.current) {
+        clearTimeout(ackTimerRef.current);
+        ackTimerRef.current = null;
+      }
+    }, []);
 
-    const sendNextChunk = () => {
-        if (!sendingFile.current) return;
+    
+    const sendChunkBatch = useCallback(() => {
+        if (!sendingFile.current || !dataChannelRef.current) return;
+    
+        const { windowSize, inFlight } = slidingWindow.current;
+        const totalChunks = Math.ceil(sendingFile.current.file.size / CHUNK_SIZE);
+    
+        const bufferedAmount = dataChannelRef.current.bufferedAmount;
+        const threshold = 4 * 1024 * 1024;
+    
+        if (bufferedAmount > threshold) {
+            dataChannelRef.current.bufferedAmountLowThreshold = threshold/2;
+            return;
+        }
+    
+        let sent = 0;
+        while (inFlight.size < windowSize && slidingWindow.current.nextToSend < totalChunks && sent < 64) {
+            const chunkIndex = slidingWindow.current.nextToSend;
+    
+            const start = chunkIndex * CHUNK_SIZE;
+            const end = Math.min(start + CHUNK_SIZE, sendingFile.current.file.size);
+            const slice = sendingFile.current.file.slice(start, end);
+    
+            slice.arrayBuffer().then(buffer => {
+                const indexedChunk = new ArrayBuffer(buffer.byteLength + 4);
+                const view = new DataView(indexedChunk);
+                view.setUint32(0, chunkIndex, true);
+                new Uint8Array(indexedChunk, 4).set(new Uint8Array(buffer));
+    
+                dataChannelRef.current?.send(indexedChunk);
+                congestionControl.current.sentTimes.set(chunkIndex, Date.now());
+            });
+    
+            inFlight.add(chunkIndex);
+            slidingWindow.current.nextToSend++;
+            sent++;
+        }
+    
+        if (slidingWindow.current.nextToSend < totalChunks) {
+            requestAnimationFrame(sendChunkBatch);
+        }
+    }, []);
+    
+    const adjustWindowSize = useCallback(() => {
+      const { windowSize, maxWindowSize, minWindowSize, inFlight } = slidingWindow.current;
+      const { rttAvg, rttSamples } = congestionControl.current;
+      
+      if (rttSamples.length < 3) return;
+      
+      const recentRtt = rttSamples[rttSamples.length - 1];
+      const rttIncrease = recentRtt / rttAvg;
+      
+      if (rttIncrease > 1.3) {
+        slidingWindow.current.windowSize = Math.max(
+          minWindowSize,
+          Math.floor(windowSize * 0.7)
+        );
+        log(`🔻 Congestion: window ${windowSize} → ${slidingWindow.current.windowSize}`);
+      }
+      else if (inFlight.size < windowSize / 2 && rttIncrease < 1.1) {
+        slidingWindow.current.windowSize = Math.min(
+          maxWindowSize,
+          Math.floor(windowSize * 1.2)
+        );
+        log(`🔺 Stable: window ${windowSize} → ${slidingWindow.current.windowSize}`);
+      }
+    }, [log]);
 
-        const start = currentChunkToSend.current * CHUNK_SIZE;
-        const end = Math.min(start + CHUNK_SIZE, sendingFile.current.file.size);
-        const slice = sendingFile.current.file.slice(start, end);
-
-        fileReaderRef.current.onload = () => {
-            if (fileReaderRef.current.result) {
-                dcRef.current?.send(fileReaderRef.current.result as ArrayBuffer);
-            }
-        };
-
-        fileReaderRef.current.readAsArrayBuffer(slice);
-    };
 
     const processNextFileInQueue = () => {
         const nextFile = sendQueue.find((f) => f.status === "pending");
-        if (!nextFile || !dcRef.current) return;
-
+        if (!nextFile || !dataChannelRef.current || !controlChannelRef.current) return;
+    
         sendingFile.current = nextFile;
-        currentChunkToSend.current = nextFile.lastSentChunk + 1;
-
+        
+        slidingWindow.current = {
+            windowSize: 32,
+            maxWindowSize: 256,
+            minWindowSize: 8,
+            inFlight: new Set(),
+            nextToSend: nextFile.lastSentChunk + 1,
+            lastAcked: nextFile.lastSentChunk,
+            ackBitmap: new Map()
+        };
+    
         setSendQueue((prev) =>
             prev.map((f) =>
                 f.id === nextFile.id
@@ -332,11 +501,11 @@ export function useP2P() {
                     : f
             )
         );
-
+    
         const totalChunks = Math.ceil(nextFile.file.size / CHUNK_SIZE);
-
+    
         if (nextFile.lastSentChunk === -1) {
-            dcRef.current.send(
+            controlChannelRef.current.send(
                 JSON.stringify({
                     type: "meta",
                     name: nextFile.file.name,
@@ -347,9 +516,10 @@ export function useP2P() {
                 })
             );
         }
-
-        sendNextChunk();
+    
+        sendChunkBatch();
     };
+
 
     const ensurePeer = useCallback(() => {
         if (pcRef.current) return;
@@ -370,15 +540,29 @@ export function useP2P() {
         };
 
         pc.ondatachannel = (event) => {
-            console.log("Data channel received");
-            bindChannel(event.channel);
+            console.log("Data channel received:", event.channel.label);
+            if (event.channel.label === "control") {
+                bindControlChannel(event.channel);
+            } else if (event.channel.label === "data") {
+                bindDataChannel(event.channel);
+            }
         };
 
-        const dc = pc.createDataChannel("data");
-        bindChannel(dc);
+        const controlChannel = pc.createDataChannel("control", {
+            ordered: true,
+            maxRetransmits: 10
+        });
+        bindControlChannel(controlChannel);
+        
+        const dataChannel = pc.createDataChannel("data", {
+            ordered: false,
+            maxRetransmits: 2
+        });
+        bindDataChannel(dataChannel);
+
 
         pcRef.current = pc;
-    }, [roomId, bindChannel]);
+    }, [roomId, bindControlChannel, bindDataChannel]);
 
     const makeOffer = useCallback(async () => {
         const offer = await pcRef.current?.createOffer();
@@ -493,8 +677,8 @@ export function useP2P() {
         const file = sendQueue.find((f) => f.id === fileId);
         if (file) {
             if (file.status === "sending") {
-                dcRef.current?.send(JSON.stringify({ type: "cancel" }));
-                sendingFile.current = null;
+              controlChannelRef.current?.send(JSON.stringify({ type: "cancel" }));
+              sendingFile.current = null;
             }
 
             await clearPartialSendState(roomId, file.file.name, file.file.size);
@@ -505,7 +689,7 @@ export function useP2P() {
 
     const clearAllQueue = useCallback(async () => {
         if (sendingFile.current) {
-            dcRef.current?.send(JSON.stringify({ type: "cancel" }));
+            controlChannelRef.current?.send(JSON.stringify({ type: "cancel" }));
             sendingFile.current = null;
         }
 
