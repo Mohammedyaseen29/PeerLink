@@ -34,18 +34,38 @@ export type ReceivingFile = {
     bytesReceived: number;
 };
 
+export type RoomType = "persistent" | "temporary";
+
+export type ChatMessage = {
+    id: string;
+    senderId: string;
+    senderName: string;
+    content: string;
+    timestamp: number;
+    status: "sent" | "delivered" | "read";
+};
+
+export type Settings = {
+    autoDownload: boolean;
+};
+
 export type P2PState = {
     connected: boolean;
     connectionType: ConnectionType;
     roomId: string;
+    roomType: RoomType;
     sendQueue: QueuedFile[];
     receivedFiles: FileMetadata[];
     currentReceiving: ReceivingFile | null;
     logs: string[];
+    chatMessages: ChatMessage[];
+    unreadCount: number;
+    settings: Settings;
+    username: string;
 };
 
 export type P2PActions = {
-    join: (roomId: string) => void;
+    join: (roomId: string, roomType?: RoomType) => void;
     setRoomId: (roomId: string) => void;
     addFilesToQueue: (files: File[]) => Promise<void>;
     pauseSending: (fileId: string) => void;
@@ -55,4 +75,9 @@ export type P2PActions = {
     downloadFile: (file: FileMetadata) => Promise<void>;
     clearRoom: () => Promise<void>;
     openPreview: (file: FileMetadata) => Promise<string>;
+    sendChatMessage: (content: string) => void;
+    markChatRead: () => void;
+    updateSettings: (settings: Partial<Settings>) => void;
+    setChatOpen: (open: boolean) => void;
+    setSettingsOpen: (open: boolean) => void;
 };

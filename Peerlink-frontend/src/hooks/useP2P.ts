@@ -14,7 +14,7 @@ import {
     openDB,
     type FileMetadata,
 } from "../ProgressDB";
-import type { QueuedFile, ConnectionType, ReceivingFile } from "../types";
+import type { QueuedFile, ConnectionType, ReceivingFile, ChatMessage, Settings, RoomType } from "../types";
 import { generateId } from "../utils/helpers";
 
 const ICE_SERVERS = [
@@ -27,27 +27,77 @@ const ICE_SERVERS = [
 ];
 
 const CHUNK_SIZE = 64 * 1024;
+const STORAGE_KEY = "peerlink_settings";
+
+const ADJECTIVES = ["Swift", "Cosmic", "Neon", "Shadow", "Crystal", "Thunder", "Frost", "Blaze", "Lunar", "Storm", "Echo", "Phoenix", "Nova", "Vortex", "Pixel", "Cyber", "Quantum", "Hyper", "Ultra", "Mega"];
+const NOUNS = ["Spidy", "Foxy", "Rexy", "Wolf", "Tiger", "Eagle", "Hawk", "Fox", "Bear", "Lynx", "Owl", "Raven", "Falcon", "Dragon", "Leopard", "Panther", "Lion"];
+
+
+function generateMeaningfulName(): string {
+    const adj = ADJECTIVES[Math.floor(Math.random() * ADJECTIVES.length)];
+    const noun = NOUNS[Math.floor(Math.random() * NOUNS.length)];
+    return `${adj}${noun}`;
+}
+
+function generateRoomId(): string {
+    const adj = ADJECTIVES[Math.floor(Math.random() * ADJECTIVES.length)].toLowerCase();
+    const noun = NOUNS[Math.floor(Math.random() * NOUNS.length)].toLowerCase();
+    const num = Math.floor(Math.random() * 100) + 1;
+    return `${adj}-${noun}-${num}`;
+}
+
+function loadSettings(): Settings {
+    try {
+        const stored = localStorage.getItem(STORAGE_KEY);
+        if (stored) return JSON.parse(stored);
+    } catch {}
+    return { autoDownload: false };
+}
+
+function saveSettings(settings: Settings): void {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(settings));
+}
+
+function getUsername(): string {
+    const stored = localStorage.getItem(STORAGE_KEY);
+    if (stored) {
+        try {
+            const parsed = JSON.parse(stored);
+            if (parsed.username) return parsed.username;
+        } catch {}
+    }
+    return generateMeaningfulName();
+}
 
 export function useP2P() {
     const [roomId, setRoomId] = useState("");
+    const [roomType, setRoomType] = useState<RoomType>("persistent");
     const [connected, setConnected] = useState(false);
     const [connectionType, setConnectionType] = useState<ConnectionType>("disconnected");
     const [logs, setLogs] = useState<string[]>([]);
     const [sendQueue, setSendQueue] = useState<QueuedFile[]>([]);
     const [receivedFiles, setReceivedFiles] = useState<FileMetadata[]>([]);
     const [currentReceiving, setCurrentReceiving] = useState<ReceivingFile | null>(null);
-
+    const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]);
+    const [unreadCount, setUnreadCount] = useState(0);
+    const [settings, setSettings] = useState<Settings>(loadSettings);
+    const [username] = useState<string>(getUsername);
+    const [isChatOpen, setIsChatOpen] = useState(false);
+    const [isSettingsOpen, setIsSettingsOpen] = useState(false);
+    const peerLeftRef = useRef(false);
     const wsRef = useRef<WebSocket | null>(null);
     const pcRef = useRef<RTCPeerConnection | null>(null);
     const currentFileId = useRef<string | null>(null);
     const currentMeta = useRef<FileMetadata | null>(null);
     const lastReceivedChunk = useRef<number>(-1);
+    const receivedChunksSet = useRef<Set<number>>(new Set());
     const sendingFile = useRef<QueuedFile | null>(null);
     const controlChannelRef = useRef<RTCDataChannel | null>(null);
     const dataChannelRef = useRef<RTCDataChannel | null>(null);
     const receiveStartTime = useRef<number>(0);
     const receiverAckBuffer = useRef<Set<number>>(new Set());
     const ackTimerRef = useRef<number | null>(null);
+    const retransmitTimerRef = useRef<number | null>(null);
     const slidingWindow = useRef({
       windowSize: 32,
       maxWindowSize: 256, 
@@ -67,7 +117,7 @@ export function useP2P() {
     const log = useCallback((message: string) => {
         setLogs((prev) => [...prev, message]);
         console.log(message);
-    }, []);
+    }, []);  
 
     // Load received files when roomId changes
     useEffect(() => {
@@ -117,7 +167,7 @@ export function useP2P() {
         controlChannelRef.current = ch;
     
         ch.onopen = () => {
-            console.log("✅ Control channel opened");
+            console.log("Control channel opened");
         };
     
         ch.onmessage = async (event) => {
@@ -127,7 +177,7 @@ export function useP2P() {
         };
     
         ch.onclose = () => {
-            console.log("❌ Control channel closed");
+            console.log("Control channel closed");
         };
     }, []);
     
@@ -135,7 +185,7 @@ export function useP2P() {
         dataChannelRef.current = ch;
     
         ch.onopen = () => {
-            console.log("✅ Data channel opened");
+            console.log("Data channel opened");
             setConnected(true);
             if (pcRef.current) {
                 detectConnectionType(pcRef.current);
@@ -149,7 +199,7 @@ export function useP2P() {
         };
     
         ch.onclose = () => {
-            console.log("❌ Data channel closed");
+            console.log("Data channel closed");
             setConnected(false);
             setConnectionType("disconnected");
         };
@@ -170,6 +220,7 @@ export function useP2P() {
                     const fileId = `${roomId}_${Date.now()}_${Math.random()}`;
                     currentFileId.current = fileId;
                     lastReceivedChunk.current = -1;
+                    receivedChunksSet.current.clear();
                     receiveStartTime.current = Date.now();
 
                     const metaData: FileMetadata = {
@@ -217,16 +268,81 @@ export function useP2P() {
                         log(`✓ Received: ${currentMeta.current.name}`);
                         const files = await getFilesInRoom(roomId);
                         setReceivedFiles(files.filter((f) => f.status === "complete"));
+                        
+                        const completedFile = files.find(f => f.fileId === currentFileId.current);
+                        if (completedFile) {
+                            const savedSettings = loadSettings();
+                            if (savedSettings.autoDownload) {
+                                try {
+                                    await streamFileToDownload(completedFile.fileId);
+                                    log(`Auto-downloaded: ${completedFile.name}`);
+                                } catch (err) {
+                                    console.error("Auto-download failed:", err);
+                                }
+                            }
+                        }
+                        
                         setCurrentReceiving(null);
                     }
                     break;
+
+                case "chat": {
+                    const chatMsg: ChatMessage = {
+                        id: msg.id,
+                        senderId: msg.senderId,
+                        senderName: msg.senderName,
+                        content: msg.content,
+                        timestamp: msg.timestamp,
+                        status: "delivered"
+                    };
+                    setChatMessages(prev => [...prev, chatMsg]);
+                    if (!isChatOpen) {
+                        setUnreadCount(prev => prev + 1);
+                    }
+                    controlChannelRef.current?.send(JSON.stringify({
+                        type: "chat_ack",
+                        id: msg.id
+                    }));
+                    break;
+                }
+
+                case "chat_ack": {
+                    setChatMessages(prev => prev.map(m => 
+                        m.id === msg.id ? { ...m, status: "sent" } : m
+                    ));
+                    break;
+                }
+
+                case "peer_left": {
+                    log("Peer left the room");
+                    if (roomType === "temporary") {
+                        peerLeftRef.current = true;
+                        if (wsRef.current?.readyState === WebSocket.OPEN) {
+                            wsRef.current.send(JSON.stringify({ type: "peer_left_room", roomId }));
+                        }
+                    }
+                    break;
+                }
+
+                case "room_cleared": {
+                    if (roomType === "temporary") {
+                        log("Temporary room cleared - peer left");
+                        setConnected(false);
+                        setConnectionType("disconnected");
+                        const files = await getFilesInRoom(roomId);
+                        for (const file of files) {
+                            await deleteFile(file.fileId);
+                        }
+                        setReceivedFiles([]);
+                    }
+                    break;
+                }
 
                 case "ack":{
                   if (!sendingFile.current) break;
                     
                     const ackedChunks = msg.chunks as number[];  // Receive array of chunk indices
                     const { inFlight, ackBitmap } = slidingWindow.current;
-                    let {lastAcked} = slidingWindow.current;
                     
                     // Process each ACK
                     ackedChunks.forEach(chunkIdx => {
@@ -248,17 +364,20 @@ export function useP2P() {
                       }
                     });
                     
-                    // Advance lastAcked window (find highest contiguous ACK)
-                    while (ackBitmap.get(lastAcked + 1)) {
-                      lastAcked++;
-                    }
-                    slidingWindow.current.lastAcked = lastAcked;
-                    
                     adjustWindowSize();
                     
                     const totalChunks = Math.ceil(sendingFile.current.file.size / CHUNK_SIZE);
-                    const progress = Math.round(((lastAcked + 1) / totalChunks) * 100);
-                    const bytesTransferred = (lastAcked + 1) * CHUNK_SIZE;
+                    const totalAcked = ackBitmap.size;
+                    const progress = Math.round((totalAcked / totalChunks) * 100);
+                    const bytesTransferred = Math.min(totalAcked * CHUNK_SIZE, sendingFile.current.file.size);
+                    
+                    // compute contiguous lastAcked
+                    let lastAcked = slidingWindow.current.lastAcked;
+
+                    while (ackBitmap.get(lastAcked + 1)) {
+                        lastAcked++;
+                    }
+                    slidingWindow.current.lastAcked = lastAcked;
                     
                     await savePartialSendState(
                         roomId,
@@ -282,7 +401,7 @@ export function useP2P() {
                         })
                     );
                     
-                    if (lastAcked + 1 >= totalChunks) {
+                    if (totalAcked >= totalChunks) {
                         controlChannelRef.current?.send(JSON.stringify({ type: "done" }));
                         log(`✓ Sent: ${sendingFile.current.file.name}`);
                     
@@ -299,6 +418,11 @@ export function useP2P() {
                                     : f
                             )
                         );
+                        
+                        if (retransmitTimerRef.current) {
+                            clearTimeout(retransmitTimerRef.current);
+                            retransmitTimerRef.current = null;
+                        }
                         
                         slidingWindow.current = {
                             windowSize: 32,
@@ -335,6 +459,10 @@ export function useP2P() {
                                 f.id === sendingFile.current?.id ? { ...f, status: "paused" } : f
                             )
                         );
+                        if (retransmitTimerRef.current) {
+                            clearTimeout(retransmitTimerRef.current);
+                            retransmitTimerRef.current = null;
+                        }
                         sendingFile.current = null;
                     }
                     break;
@@ -361,6 +489,12 @@ export function useP2P() {
         const view = new DataView(data);
         const chunkIndex = view.getUint32(0, true);
         const chunkData = data.slice(4);
+        
+        if (receivedChunksSet.current.has(chunkIndex)) {
+            return;
+        }
+        receivedChunksSet.current.add(chunkIndex);
+        
         await saveChunk(currentFileId.current, chunkIndex, chunkData);
         if (chunkIndex > lastReceivedChunk.current) {
             lastReceivedChunk.current = chunkIndex;
@@ -369,17 +503,20 @@ export function useP2P() {
           // Add to ACK buffer
           receiverAckBuffer.current.add(chunkIndex);
           
-          // Send batched ACK every 8 chunks OR every 50ms
+          // Send batched ACK every 32 chunks OR every 20ms
           if (receiverAckBuffer.current.size >= 32) {
             sendBatchedAck();
           } else if (!ackTimerRef.current) {
             ackTimerRef.current = window.setTimeout(sendBatchedAck, 20);
           }
           
+          const uniqueChunksReceived = receivedChunksSet.current.size;
           const progress = Math.round(
-              ((lastReceivedChunk.current + 1) / currentMeta.current.totalChunks) * 100
+              (uniqueChunksReceived / currentMeta.current.totalChunks) * 100
           );
-          const bytesReceived = (lastReceivedChunk.current + 1) * CHUNK_SIZE;
+          const bytesReceived = uniqueChunksReceived * CHUNK_SIZE;
+          
+          await updateFileProgress(currentFileId.current, uniqueChunksReceived, "receiving");
           
           setCurrentReceiving((prev) =>
               prev
@@ -391,6 +528,14 @@ export function useP2P() {
                   : null
           );
           
+          if (uniqueChunksReceived >= currentMeta.current.totalChunks) {
+              controlChannelRef.current?.send(JSON.stringify({ type: "done" }));
+              await updateFileProgress(currentFileId.current, currentMeta.current.totalChunks, "complete");
+              log(`✓ Received: ${currentMeta.current.name}`);
+              const files = await getFilesInRoom(roomId);
+              setReceivedFiles(files.filter((f) => f.status === "complete"));
+              setCurrentReceiving(null);
+          }
         
     };
     const sendBatchedAck = useCallback(() => {
@@ -477,6 +622,50 @@ export function useP2P() {
       }
     }, [log]);
 
+    const retransmitLostChunks = useCallback(() => {
+        if (!sendingFile.current || !dataChannelRef.current) return;
+        
+        const { inFlight, ackBitmap } = slidingWindow.current;
+        const { rttAvg, sentTimes } = congestionControl.current;
+        const timeout = Math.max(rttAvg * 4, 500);
+        const now = Date.now();
+        
+        const toRetransmit: number[] = [];
+        
+        inFlight.forEach(chunkIdx => {
+            const sentTime = sentTimes.get(chunkIdx);
+            if (sentTime && (now - sentTime > timeout)) {
+                if (!ackBitmap.has(chunkIdx)) {
+                    toRetransmit.push(chunkIdx);
+                }
+            }
+        });
+        
+        if (toRetransmit.length > 0) {
+            log(`Retransmitting ${toRetransmit.length} lost chunks`);
+        }
+        
+        toRetransmit.forEach(chunkIdx => {
+            const start = chunkIdx * CHUNK_SIZE;
+            const end = Math.min(start + CHUNK_SIZE, sendingFile.current!.file.size);
+            const slice = sendingFile.current!.file.slice(start, end);
+            
+            slice.arrayBuffer().then(buffer => {
+                const indexedChunk = new ArrayBuffer(buffer.byteLength + 4);
+                const view = new DataView(indexedChunk);
+                view.setUint32(0, chunkIdx, true);
+                new Uint8Array(indexedChunk, 4).set(new Uint8Array(buffer));
+                
+                dataChannelRef.current?.send(indexedChunk);
+                congestionControl.current.sentTimes.set(chunkIdx, Date.now());
+            });
+        });
+        
+        if (sendingFile.current && inFlight.size > 0) {
+            retransmitTimerRef.current = window.setTimeout(retransmitLostChunks, 200);
+        }
+    }, [log]);
+
 
     const processNextFileInQueue = () => {
         const nextFile = sendQueue.find((f) => f.status === "pending");
@@ -515,8 +704,17 @@ export function useP2P() {
                     totalChunks,
                 })
             );
+            
+            for (let i = 0; i <= nextFile.lastSentChunk; i++) {
+                slidingWindow.current.ackBitmap.set(i, true);
+            }
         }
-    
+        
+        if (retransmitTimerRef.current) {
+            clearTimeout(retransmitTimerRef.current);
+        }
+        retransmitTimerRef.current = window.setTimeout(retransmitLostChunks, 200);
+        
         sendChunkBatch();
     };
 
@@ -658,6 +856,10 @@ export function useP2P() {
             setSendQueue((prev) =>
                 prev.map((f) => (f.id === fileId ? { ...f, status: "paused" } : f))
             );
+            if (retransmitTimerRef.current) {
+                clearTimeout(retransmitTimerRef.current);
+                retransmitTimerRef.current = null;
+            }
             sendingFile.current = null;
             log(`⏸ Paused: ${file.file.name}`);
         }
@@ -678,6 +880,10 @@ export function useP2P() {
         if (file) {
             if (file.status === "sending") {
               controlChannelRef.current?.send(JSON.stringify({ type: "cancel" }));
+              if (retransmitTimerRef.current) {
+                  clearTimeout(retransmitTimerRef.current);
+                  retransmitTimerRef.current = null;
+              }
               sendingFile.current = null;
             }
 
@@ -690,6 +896,10 @@ export function useP2P() {
     const clearAllQueue = useCallback(async () => {
         if (sendingFile.current) {
             controlChannelRef.current?.send(JSON.stringify({ type: "cancel" }));
+            if (retransmitTimerRef.current) {
+                clearTimeout(retransmitTimerRef.current);
+                retransmitTimerRef.current = null;
+            }
             sendingFile.current = null;
         }
 
@@ -755,19 +965,72 @@ export function useP2P() {
         return URL.createObjectURL(blob);
     }, []);
 
+    const sendChatMessage = useCallback((content: string) => {
+        if (!content.trim() || !controlChannelRef.current) return;
+        
+        const msg: ChatMessage = {
+            id: generateId(),
+            senderId: username,
+            senderName: username,
+            content: content.trim(),
+            timestamp: Date.now(),
+            status: "sent"
+        };
+        
+        setChatMessages(prev => [...prev, msg]);
+        
+        controlChannelRef.current.send(JSON.stringify({
+            type: "chat",
+            id: msg.id,
+            senderId: username,
+            senderName: username,
+            content: msg.content,
+            timestamp: msg.timestamp
+        }));
+    }, [username]);
+
+    const markChatRead = useCallback(() => {
+        setUnreadCount(0);
+    }, []);
+
+    const updateSettings = useCallback((newSettings: Partial<Settings>) => {
+        setSettings(prev => {
+            const updated = { ...prev, ...newSettings };
+            saveSettings(updated);
+            return updated;
+        });
+    }, []);
+
+    const joinWithType = useCallback((newRoomId: string, newRoomType: RoomType = "persistent") => {
+        setRoomType(newRoomType);
+        peerLeftRef.current = false;
+        join(newRoomId);
+    }, [join]);
+
+    useEffect(() => {
+        if (isChatOpen) {
+            markChatRead();
+        }
+    }, [isChatOpen, markChatRead]);
+
     return {
-        // State
         roomId,
+        roomType,
         connected,
         connectionType,
         logs,
         sendQueue,
         receivedFiles,
         currentReceiving,
+        chatMessages,
+        unreadCount,
+        settings,
+        username,
+        isChatOpen,
+        isSettingsOpen,
 
-        // Actions
         setRoomId,
-        join,
+        join: joinWithType,
         addFilesToQueue,
         pauseSending,
         resumeSending,
@@ -776,5 +1039,11 @@ export function useP2P() {
         downloadFile,
         clearRoom,
         openPreview,
+        sendChatMessage,
+        markChatRead,
+        updateSettings,
+        setIsChatOpen,
+        setIsSettingsOpen,
+        generateRoomId,
     };
 }

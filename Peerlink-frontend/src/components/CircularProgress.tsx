@@ -1,3 +1,5 @@
+import { Check } from "lucide-react";
+
 interface CircularProgressProps {
     progress: number;
     size?: number;
@@ -24,12 +26,14 @@ export function CircularProgress({
     const offset = circumference - (progress / 100) * circumference;
 
     const statusColors = {
-        sending: "var(--progress-sending, #f59e0b)", // Added hex fallback
+        sending: "var(--progress-sending, #f59e0b)",
         receiving: "var(--progress-receiving, #10b981)",
         paused: "var(--progress-paused, #6b7280)",
         pending: "var(--progress-pending, #6366f1)",
-        sent: "var(--progress-sent, #3b82f6)",
+        sent: "var(--progress-sent, #22c55e)",
     };
+
+    const isComplete = status === "sent" || progress === 100;
 
     return (
         <div 
@@ -81,7 +85,19 @@ export function CircularProgress({
                     }}
                 />
             </svg>
-            {showPercentage && (
+            {isComplete ? (
+                <div style={{
+                    width: size * 0.5,
+                    height: size * 0.5,
+                    borderRadius: '50%',
+                    backgroundColor: statusColors.sent,
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'center'
+                }}>
+                    <Check size={size * 0.35} color="white" strokeWidth={3} />
+                </div>
+            ) : showPercentage && (
                 <span className="progress-text" style={{ zIndex: 1, fontSize: '12px', fontWeight: 'bold' }}>
                     {Math.round(progress)}%
                 </span>

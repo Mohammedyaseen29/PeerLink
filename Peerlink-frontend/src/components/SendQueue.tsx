@@ -78,19 +78,19 @@ export function SendQueue({
                                         <span>{formatTime(eta)}</span>
                                     </div>
                                 )}
-                                <span className={`status-badge badge-${file.status}`}>
-                                    {file.status === "sending"
+                                <span className={`status-badge ${file.progress === 100 ? 'badge-sent' : 'badge-' + file.status}`}>
+                                    {file.status === "sending" && file.progress < 100
                                         ? `${file.progress}%`
                                         : file.status === "paused"
                                             ? "Paused"
-                                            : file.status === "sent"
-                                                ? "Complete"
+                                            : file.progress === 100 || file.status === "sent"
+                                                ? "Sent"
                                                 : "Pending"}
                                 </span>
                             </div>
 
                             <div className="file-actions">
-                                {file.status === "sending" && (
+                                {file.status === "sending" && file.progress < 100 && (
                                     <button
                                         onClick={() => onPause(file.id)}
                                         className="btn-icon"
@@ -108,7 +108,7 @@ export function SendQueue({
                                         <Play size={16} />
                                     </button>
                                 )}
-                                {file.status !== "sent" && (
+                                {file.status !== "sent" && file.progress < 100 && (
                                     <button
                                         onClick={() => onRemove(file.id)}
                                         className="btn-icon btn-danger"

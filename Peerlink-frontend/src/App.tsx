@@ -9,18 +9,27 @@ import {
   ReceivedFiles,
   FilePreviewModal,
   LogPanel,
+  ChatPanel,
+  SettingsModal,
 } from "./components";
 import type { FileMetadata } from "./ProgressDB";
 
 function App() {
   const {
     roomId,
+    roomType,
     connected,
     connectionType,
     logs,
     sendQueue,
     receivedFiles,
     currentReceiving,
+    chatMessages,
+    unreadCount,
+    settings,
+    username,
+    isChatOpen,
+    isSettingsOpen,
     setRoomId,
     join,
     addFilesToQueue,
@@ -31,6 +40,11 @@ function App() {
     downloadFile,
     clearRoom,
     openPreview,
+    sendChatMessage,
+    updateSettings,
+    setIsChatOpen,
+    setIsSettingsOpen,
+    generateRoomId,
   } = useP2P();
 
   const [previewFile, setPreviewFile] = useState<FileMetadata | null>(null);
@@ -57,7 +71,13 @@ function App() {
   return (
     <div className="app-container">
       <main className="main-content">
-        <Header />
+        <Header 
+          onSettingsClick={() => setIsSettingsOpen(true)}
+          onChatClick={() => setIsChatOpen(true)}
+          unreadCount={unreadCount}
+          connected={connected}
+          username={username}
+        />
 
         <RoomConnection
           roomId={roomId}
@@ -65,6 +85,8 @@ function App() {
           onJoin={join}
           connected={connected}
           connectionType={connectionType}
+          roomType={roomType}
+          generateRoomId={generateRoomId}
         />
 
         {connected && (
@@ -104,6 +126,21 @@ function App() {
             onClose={handleClosePreview}
           />
         )}
+
+        <ChatPanel
+          isOpen={isChatOpen}
+          onClose={() => setIsChatOpen(false)}
+          messages={chatMessages}
+          username={username}
+          onSendMessage={sendChatMessage}
+        />
+
+        <SettingsModal
+          isOpen={isSettingsOpen}
+          onClose={() => setIsSettingsOpen(false)}
+          settings={settings}
+          onUpdateSettings={updateSettings}
+        />
       </main>
     </div>
   );
