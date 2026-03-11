@@ -7,6 +7,7 @@ export { SendQueue } from "./SendQueue";
 export { ReceiveProgress } from "./ReceiveProgress";
 export { ReceivedFiles } from "./ReceivedFiles";
 export { FilePreviewModal } from "./FilePreviewModal";
-export { LogPanel } from "./LogPanel";
 export { ChatPanel, ChatToggleButton } from "./ChatPanel";
 export { SettingsModal } from "./SettingsModal";
+export { Avatar } from "./Avatar";
+export { AVATARS, getAvatarById, getRandomAvatar } from "./avatars";

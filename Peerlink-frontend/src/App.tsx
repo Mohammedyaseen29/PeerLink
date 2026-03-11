@@ -8,7 +8,6 @@ import {
   ReceiveProgress,
   ReceivedFiles,
   FilePreviewModal,
-  LogPanel,
   ChatPanel,
   SettingsModal,
 } from "./components";
@@ -20,7 +19,6 @@ function App() {
     roomType,
     connected,
     connectionType,
-    logs,
     sendQueue,
     receivedFiles,
     currentReceiving,
@@ -77,6 +75,7 @@ function App() {
           unreadCount={unreadCount}
           connected={connected}
           username={username}
+          avatar={settings.avatar}
         />
 
         <RoomConnection
@@ -87,6 +86,7 @@ function App() {
           connectionType={connectionType}
           roomType={roomType}
           generateRoomId={generateRoomId}
+          avatar={settings.avatar}
         />
 
         {connected && (
@@ -117,8 +117,6 @@ function App() {
           </>
         )}
 
-        <LogPanel logs={logs} />
-
         {previewFile && (
           <FilePreviewModal
             file={previewFile}
@@ -132,6 +130,7 @@ function App() {
           onClose={() => setIsChatOpen(false)}
           messages={chatMessages}
           username={username}
+          avatar={settings.avatar}
           onSendMessage={sendChatMessage}
         />
 
@@ -139,6 +138,7 @@ function App() {
           isOpen={isSettingsOpen}
           onClose={() => setIsSettingsOpen(false)}
           settings={settings}
+          avatar={settings.avatar}
           onUpdateSettings={updateSettings}
         />
       </main>

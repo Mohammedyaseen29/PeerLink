@@ -348,6 +348,8 @@ export async function clearPartialSendState(
 }
 
 export async function clearRoom(roomId: string): Promise<void> {
+  if (!roomId || roomId.trim() === "") return;
+  
   const files = await getFilesInRoom(roomId);
   for (const file of files) {
     await deleteFile(file.fileId);

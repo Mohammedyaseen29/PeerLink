@@ -47,6 +47,7 @@ export type ChatMessage = {
 
 export type Settings = {
     autoDownload: boolean;
+    avatar: string;
 };
 
 export type P2PState = {
@@ -57,7 +58,6 @@ export type P2PState = {
     sendQueue: QueuedFile[];
     receivedFiles: FileMetadata[];
     currentReceiving: ReceivingFile | null;
-    logs: string[];
     chatMessages: ChatMessage[];
     unreadCount: number;
     settings: Settings;

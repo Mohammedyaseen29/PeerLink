@@ -1,11 +1,14 @@
 import { useState, useEffect } from "react";
-import { X, Download, Settings } from "lucide-react";
+import { X, Download, Settings, Check } from "lucide-react";
 import type { Settings as SettingsType } from "../types";
+import { Avatar } from "./Avatar";
+import { AVATARS } from "./avatars";
 
 interface SettingsModalProps {
     isOpen: boolean;
     onClose: () => void;
     settings: SettingsType;
+    avatar: string;
     onUpdateSettings: (settings: Partial<SettingsType>) => void;
 }
 
@@ -13,81 +16,108 @@ export function SettingsModal({
     isOpen,
     onClose,
     settings,
+    avatar,
     onUpdateSettings,
 }: SettingsModalProps) {
     const [autoDownload, setAutoDownload] = useState(settings.autoDownload);
+    const [selectedAvatar, setSelectedAvatar] = useState(avatar);
 
     useEffect(() => {
         setAutoDownload(settings.autoDownload);
-    }, [settings, isOpen]);
+        setSelectedAvatar(avatar);
+    }, [settings, avatar, isOpen]);
 
     const handleSave = () => {
-        onUpdateSettings({ autoDownload });
+        onUpdateSettings({ autoDownload, avatar: selectedAvatar });
         onClose();
     };
 
     if (!isOpen) return null;
 
     return (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+        <div className="settings-modal-overlay">
             <div 
-                className="absolute inset-0 bg-black/60 backdrop-blur-sm"
+                className="settings-modal-backdrop"
                 onClick={onClose}
             />
             
-            <div className="relative w-full max-w-md bg-[#1a1a2e]/95 backdrop-blur-xl rounded-2xl shadow-2xl border border-white/10 overflow-hidden animate-scale-in">
-                {/* Header */}
-                <div className="flex items-center justify-between px-6 py-5 bg-gradient-to-r from-violet-600 to-indigo-600">
-                    <div className="flex items-center gap-3">
-                        <Settings size={22} className="text-white" />
-                        <h2 className="text-lg font-semibold text-white">Settings</h2>
+            <div className="settings-modal">
+                <div className="settings-modal-header">
+                    <div className="settings-modal-title">
+                        <Settings size={22} />
+                        <h2>Settings</h2>
                     </div>
                     <button
                         onClick={onClose}
-                        className="p-2 hover:bg-white/20 rounded-lg transition-colors"
+                        className="settings-modal-close"
                     >
-                        <X size={20} className="text-white" />
+                        <X size={20} />
                     </button>
                 </div>
 
-                {/* Content */}
-                <div className="p-6 space-y-6">
-                    {/* Auto-download Option */}
-                    <div className="bg-white/5 rounded-xl p-4 border border-white/5">
-                        <label className="flex items-center justify-between cursor-pointer">
-                            <div className="flex items-center gap-3">
-                                <div className="p-2.5 bg-violet-600/20 rounded-lg">
-                                    <Download size={20} className="text-violet-400" />
+                <div className="settings-modal-content">
+                    <div className="settings-section">
+                        <h3 className="settings-section-title">Profile</h3>
+                        <div className="settings-avatar-section">
+                            <div className="settings-avatar-preview">
+                                <Avatar avatarId={selectedAvatar} size="lg" />
+                            </div>
+                            <div className="settings-avatar-picker">
+                                <p className="settings-avatar-label">Choose your avatar</p>
+                                <div className="avatar-picker-grid">
+                                    {AVATARS.map((av) => (
+                                        <button
+                                            key={av.id}
+                                            type="button"
+                                            className={`avatar-picker-item ${selectedAvatar === av.id ? "selected" : ""}`}
+                                            onClick={() => setSelectedAvatar(av.id)}
+                                        >
+                                            <div 
+                                                className="avatar-blob avatar-blob-sm"
+                                                style={{
+                                                    backgroundColor: av.bgColor,
+                                                    color: av.color,
+                                                }}
+                                            >
+                                                {av.emoji}
+                                            </div>
+                                            {selectedAvatar === av.id && (
+                                                <div className="avatar-picker-check">
+                                                    <Check size={12} />
+                                                </div>
+                                            )}
+                                        </button>
+                                    ))}
                                 </div>
-                                <div>
-                                    <span className="text-sm font-medium text-gray-200 block">
-                                        Auto-download files
-                                    </span>
-                                    <span className="text-xs text-gray-500">
-                                        Automatically download when transfer completes
-                                    </span>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div className="settings-section">
+                        <h3 className="settings-section-title">Preferences</h3>
+                        <label className="settings-toggle">
+                            <div className="settings-toggle-info">
+                                <div className="settings-toggle-icon">
+                                    <Download size={20} />
+                                </div>
+                                <div className="settings-toggle-text">
+                                    <span className="settings-toggle-label">Auto-download files</span>
+                                    <span className="settings-toggle-desc">Automatically download when transfer completes</span>
                                 </div>
                             </div>
                             <div 
-                                className={`relative w-12 h-6 rounded-full transition-colors shrink-0 ${
-                                    autoDownload ? "bg-violet-600" : "bg-white/20"
-                                }`}
+                                className={`settings-toggle-switch ${autoDownload ? "active" : ""}`}
                                 onClick={() => setAutoDownload(!autoDownload)}
                             >
-                                <div 
-                                    className={`absolute top-1 w-4 h-4 bg-white rounded-full transition-transform ${
-                                        autoDownload ? "translate-x-7" : "translate-x-1"
-                                    }`}
-                                />
+                                <div className="settings-toggle-knob" />
                             </div>
                         </label>
                     </div>
 
-                    {/* Save Button */}
-                    <div className="pt-2">
+                    <div className="settings-modal-footer">
                         <button
                             onClick={handleSave}
-                            className="w-full py-3.5 bg-gradient-to-r from-violet-600 to-indigo-600 hover:from-violet-500 hover:to-indigo-500 text-white font-semibold rounded-xl transition-all hover:scale-[1.02] active:scale-[0.98] shadow-lg"
+                            className="settings-save-btn"
                         >
                             Save Changes
                         </button>

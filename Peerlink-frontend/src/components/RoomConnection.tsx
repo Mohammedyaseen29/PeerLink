@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { LogIn, Hash, Clock, Database, Zap, Users, UserPlus } from "lucide-react";
 import { ConnectionIndicator } from "./ConnectionIndicator";
+import { Avatar } from "./Avatar";
 import type { ConnectionType, RoomType } from "../types";
 
 type RoomMode = "selection" | "create" | "join";
@@ -13,6 +14,7 @@ interface RoomConnectionProps {
     connectionType: ConnectionType;
     roomType: RoomType;
     generateRoomId: () => string;
+    avatar: string;
 }
 
 export function RoomConnection({
@@ -23,6 +25,7 @@ export function RoomConnection({
     connectionType,
     roomType,
     generateRoomId,
+    avatar,
 }: RoomConnectionProps) {
     const [mode, setMode] = useState<RoomMode>("selection");
     const [inputValue, setInputValue] = useState(roomId);
@@ -78,9 +81,12 @@ export function RoomConnection({
             <div className="room-connection">
                 <div className="glass-card room-card">
                     <div className="room-connected-info">
-                        <div className="room-id-display">
-                            <span className="text-sm text-gray-400">Room: </span>
-                            <span className="text-sm font-mono text-white">{roomId}</span>
+                        <div className="room-user-info">
+                            <Avatar avatarId={avatar} size="sm" />
+                            <div className="room-id-display">
+                                <span className="text-sm text-gray-400">Room: </span>
+                                <span className="text-sm font-mono text-white">{roomId}</span>
+                            </div>
                         </div>
                         
                         {roomType === "temporary" && (

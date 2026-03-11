@@ -1,5 +1,6 @@
-import { Link2, Settings, User } from "lucide-react";
+import { Link2, Settings } from "lucide-react";
 import { ChatToggleButton } from "./ChatPanel";
+import { Avatar } from "./Avatar";
 
 interface HeaderProps {
     onSettingsClick: () => void;
@@ -7,6 +8,7 @@ interface HeaderProps {
     unreadCount: number;
     connected: boolean;
     username: string;
+    avatar: string;
 }
 
 export function Header({ 
@@ -15,6 +17,7 @@ export function Header({
     unreadCount, 
     connected,
     username,
+    avatar,
 }: HeaderProps) {
     return (
         <header className="header">
@@ -35,19 +38,17 @@ export function Header({
                         />
                     )}
                     
-                    <div className="flex items-center gap-2 px-3 py-1.5 bg-white/5 rounded-lg border border-white/10">
-                        <User size={14} className="text-violet-400" />
-                        <span className="text-sm text-white/80 max-w-[100px] truncate">
-                            {username}
-                        </span>
+                    <div className="user-info">
+                        <Avatar avatarId={avatar} size="sm" />
+                        <span className="username">{username}</span>
                     </div>
                     
                     <button
                         onClick={onSettingsClick}
-                        className="p-2 rounded-xl bg-white/10 hover:bg-white/20 transition-colors"
+                        className="header-settings-btn"
                         title="Settings"
                     >
-                        <Settings size={22} className="text-white" />
+                        <Settings size={22} />
                     </button>
                 </div>
             </div>
