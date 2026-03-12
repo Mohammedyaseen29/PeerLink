@@ -842,24 +842,31 @@ export function useP2P() {
     const pauseSending = useCallback((fileId: string) => {
         const file = sendQueue.find((f) => f.id === fileId);
         if (file && file.status === "sending") {
+            const currentSentChunk = slidingWindow.current.nextToSend - 1;
+            const currentBytesTransferred = (currentSentChunk + 1) * CHUNK_SIZE;
+            
             setSendQueue((prev) =>
-                prev.map((f) => (f.id === fileId ? { ...f, status: "paused" } : f))
+                prev.map((f) => f.id === fileId ? { 
+                    ...f, 
+                    status: "paused",
+                    lastSentChunk: Math.max(f.lastSentChunk, currentSentChunk),
+                    bytesTransferred: Math.max(f.bytesTransferred || 0, currentBytesTransferred)
+                } : f)
             );
+            
             if (retransmitTimerRef.current) {
                 clearTimeout(retransmitTimerRef.current);
                 retransmitTimerRef.current = null;
             }
             sendingFile.current = null;
+            
+            controlChannelRef.current?.send(JSON.stringify({ type: "pause_req" }));
         }
     }, [sendQueue]);
 
     const resumeSending = useCallback((fileId: string) => {
         const file = sendQueue.find((f) => f.id === fileId);
         if (file && file.status === "paused") {
-            setSendQueue((prev) =>
-                prev.map((f) => (f.id === fileId ? { ...f, status: "pending" } : f))
-            );
-            
             sendingFile.current = file;
             
             slidingWindow.current = {
@@ -888,6 +895,11 @@ export function useP2P() {
                 clearTimeout(retransmitTimerRef.current);
             }
             retransmitTimerRef.current = window.setTimeout(retransmitLostChunks, 200);
+            
+            controlChannelRef.current?.send(JSON.stringify({ 
+                type: "resume_req", 
+                fromChunk: file.lastSentChunk + 1 
+            }));
             
             sendChunkBatch();
         }
