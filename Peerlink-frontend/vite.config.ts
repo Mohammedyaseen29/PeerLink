@@ -30,12 +30,6 @@ export default defineConfig({
             src: 'peerlink-logo.png',
             sizes: '512x512',
             type: 'image/png'
-          },
-          {
-            src: 'peerlink-logo.png',
-            sizes: '512x512',
-            type: 'image/png',
-            purpose: 'any maskable'
           }
         ]
       },
