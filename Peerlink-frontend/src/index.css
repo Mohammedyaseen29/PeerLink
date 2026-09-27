@@ -2094,3 +2094,107 @@ body {
     align-items: center;
     gap: var(--spacing-sm);
 }
+
+/* ========================================
+   Waiting Banner
+   ======================================== */
+.waiting-banner {
+    background: var(--bg-elevated);
+    border: 1px solid var(--border);
+    border-left: 4px solid var(--info);
+    border-radius: var(--radius-md);
+    padding: var(--spacing-md) var(--spacing-lg);
+    margin-bottom: var(--spacing-lg);
+    animation: bannerSlideIn 0.3s ease;
+}
+
+.waiting-banner-content {
+    display: flex;
+    align-items: center;
+    gap: var(--spacing-sm);
+    font-size: 0.875rem;
+    color: var(--fg-secondary);
+}
+
+.waiting-banner-spinner {
+    display: inline-block;
+    animation: spin 1.2s linear infinite;
+    font-size: 1rem;
+    color: var(--info);
+}
+
+.waiting-banner-text {
+    font-weight: 500;
+}
+
+@keyframes bannerSlideIn {
+    from {
+        opacity: 0;
+        transform: translateY(-8px);
+    }
+    to {
+        opacity: 1;
+        transform: translateY(0);
+    }
+}
+
+@keyframes spin {
+    from {
+        transform: rotate(0deg);
+    }
+    to {
+        transform: rotate(360deg);
+    }
+}
+
+/* ========================================
+   Toast Notification
+   ======================================== */
+.toast-overlay {
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    z-index: 1000;
+    display: flex;
+    justify-content: center;
+    padding-top: var(--spacing-xl);
+    pointer-events: none;
+}
+
+.toast-body {
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-left: 4px solid var(--success);
+    border-radius: var(--radius-md);
+    padding: var(--spacing-md) var(--spacing-lg);
+    display: flex;
+    align-items: center;
+    gap: var(--spacing-sm);
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
+    pointer-events: auto;
+    animation: toastSlideDown 0.3s ease;
+}
+
+.toast-icon {
+    color: var(--success);
+    font-size: 1rem;
+    font-weight: 700;
+}
+
+.toast-message-text {
+    font-size: 0.875rem;
+    font-weight: 500;
+    color: var(--fg);
+}
+
+@keyframes toastSlideDown {
+    from {
+        opacity: 0;
+        transform: translateY(-20px);
+    }
+    to {
+        opacity: 1;
+        transform: translateY(0);
+    }
+}

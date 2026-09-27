@@ -15,6 +15,7 @@ export type QueuedFile = {
     lastSentChunk: number;
     startTime?: number;
     bytesTransferred?: number;
+    totalChunks: number;
 };
 
 export type ConnectionType = "disconnected" | "local" | "p2p" | "relay";

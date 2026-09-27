@@ -1,0 +1,34 @@
+<!doctype html><html><head><title>Transport diagnostics</title></head><body>
+<button id="run">Compare packet sizes</button><pre id="result">Ready</pre>
+<script type="module">
+const result = document.querySelector('#result');
+document.querySelector('#run').onclick = async () => {
+ document.querySelector('#run').disabled = true;
+ result.textContent = 'Running transport-only checks (no storage)...';
+ try {
+  for (const size of [16384, 65408]) {
+   const a = new RTCPeerConnection(), b = new RTCPeerConnection();
+   const tx = a.createDataChannel('test', {negotiated:true,id:0});
+   const rx = b.createDataChannel('test', {negotiated:true,id:0}); rx.binaryType='arraybuffer';
+   const total=16*1048576; let received=0;
+   let finish; const done=new Promise(resolve=>finish=resolve);
+   rx.onmessage=e=>{received+=e.data.byteLength;if(received===total)finish();};
+   a.onicecandidate=e=>{if(e.candidate)b.addIceCandidate(e.candidate).catch(()=>{});};
+   b.onicecandidate=e=>{if(e.candidate)a.addIceCandidate(e.candidate).catch(()=>{});};
+   const opened=new Promise(resolve=>tx.onopen=resolve);
+   await a.setLocalDescription(await a.createOffer()); await b.setRemoteDescription(a.localDescription);
+   await b.setLocalDescription(await b.createAnswer()); await a.setRemoteDescription(b.localDescription); await opened;
+   tx.bufferedAmountLowThreshold=524288;
+   const bytes=new Uint8Array(size); let sent=0; const started=performance.now();
+   while(sent<total){
+    if(tx.bufferedAmount>1048576)await new Promise(resolve=>{tx.onbufferedamountlow=()=>resolve();});
+    const n=Math.min(size,total-sent);tx.send(bytes.subarray(0,n));sent+=n;
+   }
+   await done; const seconds=(performance.now()-started)/1000;
+   result.textContent+=`\n${size} byte messages: ${(16/seconds).toFixed(2)} MiB/s (${seconds.toFixed(2)}s)`;
+   tx.close();rx.close();a.close();b.close();
+  }
+ } catch(error){result.textContent+='\nFAIL '+error;}
+ document.querySelector('#run').disabled=false;
+};
+</script></body></html>

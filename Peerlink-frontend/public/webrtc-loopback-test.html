@@ -1,0 +1,97 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>PeerLink WebRTC Benchmark</title>
+    <style>
+      body { background: #151515; color: #f4f4f4; font: 16px system-ui, sans-serif; margin: 0; padding: 32px; }
+      main { max-width: 640px; margin: 0 auto; }
+      button { background: #35d07f; border: 0; border-radius: 4px; color: #07150d; cursor: pointer; font: inherit; font-weight: 700; padding: 10px 16px; }
+      pre { background: #232323; border-radius: 4px; min-height: 88px; padding: 16px; white-space: pre-wrap; }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>WebRTC Loopback Benchmark</h1>
+      <button id="run">Run 64 MB test</button>
+      <pre id="result">Ready</pre>
+    </main>
+    <script>
+      const CHUNK_SIZE = 64 * 1024;
+      const HIGH_WATER_MARK = 4 * 1024 * 1024;
+      const LOW_WATER_MARK = 1 * 1024 * 1024;
+      const TOTAL_BYTES = 64 * 1024 * 1024;
+      const runButton = document.getElementById("run");
+      const result = document.getElementById("result");
+
+      const waitFor = (target, event) => new Promise((resolve) => target.addEventListener(event, resolve, { once: true }));
+
+      async function runBenchmark() {
+        runButton.disabled = true;
+        result.textContent = "Creating local WebRTC peers...";
+
+        const sender = new RTCPeerConnection();
+        const receiver = new RTCPeerConnection();
+        const channel = sender.createDataChannel("benchmark", { ordered: true });
+        channel.binaryType = "arraybuffer";
+        const channelOpen = waitFor(channel, "open");
+
+        sender.onicecandidate = (event) => event.candidate && receiver.addIceCandidate(event.candidate);
+        receiver.onicecandidate = (event) => event.candidate && sender.addIceCandidate(event.candidate);
+
+        let receivedBytes = 0;
+        let receiveStart = 0;
+        let resolveComplete;
+        const complete = new Promise((resolve) => { resolveComplete = resolve; });
+
+        receiver.ondatachannel = (event) => {
+          event.channel.binaryType = "arraybuffer";
+          event.channel.onmessage = (message) => {
+            if (!receiveStart) receiveStart = performance.now();
+            receivedBytes += message.data.byteLength;
+            if (receivedBytes >= TOTAL_BYTES) resolveComplete(performance.now());
+          };
+        };
+
+        const offer = await sender.createOffer();
+        await sender.setLocalDescription(offer);
+        await receiver.setRemoteDescription(offer);
+        const answer = await receiver.createAnswer();
+        await receiver.setLocalDescription(answer);
+        await sender.setRemoteDescription(answer);
+        await channelOpen;
+
+        const payload = new Uint8Array(CHUNK_SIZE);
+        const sendStart = performance.now();
+        let sentBytes = 0;
+        while (sentBytes < TOTAL_BYTES) {
+          if (channel.bufferedAmount >= HIGH_WATER_MARK) {
+            channel.bufferedAmountLowThreshold = LOW_WATER_MARK;
+            await waitFor(channel, "bufferedamountlow");
+          }
+          channel.send(payload);
+          sentBytes += payload.byteLength;
+        }
+
+        const receiveEnd = await complete;
+        const seconds = (receiveEnd - receiveStart) / 1000;
+        const speed = (receivedBytes / 1024 / 1024) / seconds;
+        const enqueueSeconds = (performance.now() - sendStart) / 1000;
+        result.textContent = `Received ${receivedBytes / 1024 / 1024} MB in ${seconds.toFixed(3)} s\n` +
+          `Observed receive throughput: ${speed.toFixed(2)} MB/s\n` +
+          `Sender enqueue time: ${enqueueSeconds.toFixed(3)} s`;
+
+        channel.close();
+        sender.close();
+        receiver.close();
+        runButton.disabled = false;
+      }
+
+      runButton.addEventListener("click", () => runBenchmark().catch((error) => {
+        result.textContent = `Benchmark failed: ${error instanceof Error ? error.message : String(error)}`;
+        runButton.disabled = false;
+      }));
+    </script>
+  </body>
+</html>

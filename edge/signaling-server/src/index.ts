@@ -5,6 +5,15 @@ type Bindings = {
   SIGNALING_ROOM: DurableObjectNamespace;
 };
 
+type RoomSession = {
+  roomId: string;
+  username: string;
+};
+
+const MAX_ROOM_ID_LENGTH = 128;
+const MAX_ROOM_SESSIONS = 2;
+const ROOM_ID_PATTERN = /^[A-Za-z0-9_-]+$/;
+
 const app = new Hono<{ Bindings: Bindings }>();
 
 app.get("/health", (c) => c.json({ message: "iam alive" }));
@@ -22,10 +31,6 @@ app.all("*", async (c) => {
 });
 
 export class SignalingRoom extends DurableObject {
-  // We'll use a Map to track which sockets belong to which rooms
-  // since the URL no longer defines the room.
-  sessions = new Map<WebSocket, string>();
-
   constructor(ctx: DurableObjectState, env: Bindings) {
     super(ctx, env);
   }
@@ -40,59 +45,169 @@ export class SignalingRoom extends DurableObject {
     return new Response(null, { status: 101, webSocket: client });
   }
 
-  async webSocketMessage(ws: WebSocket, message: string) {
+  async webSocketMessage(ws: WebSocket, message: string | ArrayBuffer) {
+    if (typeof message !== "string") return;
+
+    let data: unknown;
     try {
-      const data = JSON.parse(message);
-      const { type, roomId, payload } = data;
+      data = JSON.parse(message);
+    } catch {
+      return;
+    }
 
-      switch (type) {
-        case "join":
-          // Store which room this specific socket belongs to
-          this.sessions.set(ws, roomId);
-          
-          // Acknowledge the join
-          ws.send(JSON.stringify({ type: "joined", roomId }));
-          
-          // Notify others in the SAME room
-          this.broadcastToRoom(roomId, { type: "peer_joined", roomId }, ws);
-          break;
+    if (!data || typeof data !== "object" || Array.isArray(data)) return;
 
-        case "offer":
-        case "answer":
-        case "ice_candidate":
-          // Relay only to people in the same roomId
-          this.broadcastToRoom(roomId, { type, payload, roomId }, ws);
-          break;
+    const { type, roomId, payload, username } = data as {
+      type?: unknown;
+      roomId?: unknown;
+      payload?: unknown;
+      username?: unknown;
+    };
 
-        case "leave":
-          this.sessions.delete(ws);
-          this.broadcastToRoom(roomId, { type: "peer_left", roomId }, ws);
-          break;
+    if (type === "join") {
+      this.join(ws, roomId, username);
+      return;
+    }
+
+    const session = this.getSession(ws);
+    if (!session) return;
+
+    switch (type) {
+      case "offer":
+      case "answer":
+      case "ice_candidate":
+        this.broadcastToRoom(session.roomId, { type, payload, roomId: session.roomId }, ws);
+        break;
+
+      case "leave":
+        this.leave(ws, session);
+        break;
+    }
+  }
+
+  webSocketClose(ws: WebSocket) {
+    const session = this.getSession(ws);
+    if (!session) return;
+
+    try {
+      ws.serializeAttachment(null);
+    } catch {
+      // Closing sockets may no longer accept attachment updates.
+    }
+    this.broadcastToRoom(session.roomId, { type: "peer_left", roomId: session.roomId }, ws);
+  }
+
+  private join(ws: WebSocket, requestedRoomId: unknown, requestedUsername: unknown) {
+    const roomId = typeof requestedRoomId === "string" ? requestedRoomId.trim() : "";
+    const existingSession = this.getSession(ws);
+
+    if (existingSession) {
+      if (roomId === existingSession.roomId) {
+        this.send(ws, {
+          type: "joined",
+          roomId: existingSession.roomId,
+          peerCount: this.countRoomSessions(existingSession.roomId, ws),
+        });
+      } else {
+        this.send(ws, { type: "error", code: "already_joined" });
       }
-    } catch (error) {
-      console.error("Signal Error:", error);
+      return;
+    }
+
+    if (
+      roomId.length === 0 ||
+      roomId.length > MAX_ROOM_ID_LENGTH ||
+      !ROOM_ID_PATTERN.test(roomId)
+    ) {
+      this.send(ws, { type: "error", code: "invalid_room_id" });
+      if (ws.readyState === 1) ws.close(4002, "Invalid room ID");
+      return;
+    }
+
+    if (this.countRoomSessions(roomId) >= MAX_ROOM_SESSIONS) {
+      this.send(ws, { type: "room_full", roomId });
+      if (ws.readyState === 1) ws.close(4001, "Room full");
+      return;
+    }
+
+    const session: RoomSession = {
+      roomId,
+      username:
+        typeof requestedUsername === "string" && requestedUsername.trim()
+          ? requestedUsername.trim().slice(0, 64)
+          : "Anonymous",
+    };
+    ws.serializeAttachment(session);
+
+    this.send(ws, {
+      type: "joined",
+      roomId,
+      peerCount: this.countRoomSessions(roomId, ws),
+    });
+    this.broadcastToRoom(
+      roomId,
+      { type: "peer_joined", roomId, username: session.username },
+      ws,
+    );
+  }
+
+  private leave(ws: WebSocket, session: RoomSession) {
+    ws.serializeAttachment(null);
+    this.broadcastToRoom(
+      session.roomId,
+      { type: "peer_left", roomId: session.roomId },
+      ws,
+    );
+  }
+
+  private getSession(ws: WebSocket): RoomSession | undefined {
+    try {
+      const attachment: unknown = ws.deserializeAttachment();
+      if (!attachment || typeof attachment !== "object") return undefined;
+
+      const session = attachment as Partial<RoomSession>;
+      if (
+        typeof session.roomId !== "string" ||
+        session.roomId.length === 0 ||
+        session.roomId.length > MAX_ROOM_ID_LENGTH ||
+        !ROOM_ID_PATTERN.test(session.roomId) ||
+        typeof session.username !== "string"
+      ) {
+        return undefined;
+      }
+      return { roomId: session.roomId, username: session.username };
+    } catch {
+      return undefined;
     }
   }
 
-  async webSocketClose(ws: WebSocket) {
-    const roomId = this.sessions.get(ws);
-    if (roomId) {
-      this.broadcastToRoom(roomId, { type: "peer_left", roomId }, ws);
-      this.sessions.delete(ws);
+  private countRoomSessions(roomId: string, exceptWs?: WebSocket) {
+    let count = 0;
+    for (const client of this.ctx.getWebSockets()) {
+      if (
+        client !== exceptWs &&
+        client.readyState === 1 &&
+        this.getSession(client)?.roomId === roomId
+      ) {
+        count++;
+      }
     }
+    return count;
   }
 
-  // New helper to only send to people with the matching Room ID
-  broadcastToRoom(roomId: string, data: any, exceptWs: WebSocket) {
+  private send(ws: WebSocket, data: Record<string, unknown>) {
+    if (ws.readyState === 1) ws.send(JSON.stringify(data));
+  }
+
+  broadcastToRoom(roomId: string, data: Record<string, unknown>, exceptWs: WebSocket) {
     const message = JSON.stringify(data);
-    const allSockets = this.ctx.getWebSockets();
-    
-    for (const client of allSockets) {
-      // Only send if the client is in the same room AND is not the sender
-      if (client !== exceptWs && this.sessions.get(client) === roomId) {
-        if (client.readyState === 1) {
-          client.send(message);
-        }
+    for (const client of this.ctx.getWebSockets()) {
+      if (
+        client !== exceptWs &&
+        client.readyState === 1 &&
+        this.getSession(client)?.roomId === roomId
+      ) {
+        client.send(message);
       }
     }
   }

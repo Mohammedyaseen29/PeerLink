@@ -85,7 +85,7 @@ export function SendQueue({
                                             ? "Paused"
                                             : file.progress === 100 || file.status === "sent"
                                                 ? "Sent"
-                                                : "Pending"}
+                                                : file.status === "failed" ? "Failed" : "Pending"}
                                 </span>
                             </div>
 
@@ -99,11 +99,11 @@ export function SendQueue({
                                         <Pause size={16} />
                                     </button>
                                 )}
-                                {file.status === "paused" && (
+                                {(file.status === "paused" || file.status === "failed") && (
                                     <button
                                         onClick={() => onResume(file.id)}
                                         className="btn-icon btn-success"
-                                        title="Resume"
+                                        title={file.status === "failed" ? "Retry" : "Resume"}
                                     >
                                         <Play size={16} />
                                     </button>

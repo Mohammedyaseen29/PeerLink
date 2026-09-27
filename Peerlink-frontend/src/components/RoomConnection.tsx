@@ -11,6 +11,7 @@ interface RoomConnectionProps {
     onRoomIdChange: (roomId: string) => void;
     onJoin: (roomId: string, roomType: RoomType) => void;
     connected: boolean;
+    inRoom: boolean;
     connectionType: ConnectionType;
     roomType: RoomType;
     generateRoomId: () => string;
@@ -22,6 +23,7 @@ export function RoomConnection({
     onRoomIdChange,
     onJoin,
     connected,
+    inRoom,
     connectionType,
     roomType,
     generateRoomId,
@@ -72,11 +74,11 @@ export function RoomConnection({
         setSelectedRoomType("persistent");
     };
 
-    if (connected && isWaiting) {
+    if ((connected || inRoom) && isWaiting) {
         setIsWaiting(false);
     }
 
-    if (connected) {
+    if (connected || inRoom) {
         return (
             <div className="room-connection">
                 <div className="glass-card room-card">
@@ -166,7 +168,7 @@ export function RoomConnection({
                             </div>
                             <p className="room-type-hint">
                                 {selectedRoomType === "persistent" 
-                                    ? "Files remain after leaving" 
+                                    ? "Locally stored file copies remain on this device"
                                     : "Data deleted when both peers leave"}
                             </p>
                         </div>

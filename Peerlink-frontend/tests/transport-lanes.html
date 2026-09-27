@@ -1,0 +1,470 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Sol High Throughput Experiment</title>
+  <style>
+    :root {
+      color-scheme: light dark;
+      font: 15px/1.5 system-ui, sans-serif;
+      --line: color-mix(in srgb, CanvasText 18%, Canvas);
+      --muted: color-mix(in srgb, CanvasText 65%, Canvas);
+      --accent: #087f70;
+    }
+    body { max-width: 980px; margin: 32px auto; padding: 0 20px 40px; }
+    h1 { margin: 0 0 20px; font-size: 1.45rem; }
+    h2 { margin: 28px 0 8px; font-size: 1rem; }
+    .controls { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+    button, select { min-height: 38px; padding: 6px 11px; font: inherit; }
+    button { cursor: pointer; }
+    button:disabled, select:disabled { cursor: not-allowed; opacity: .55; }
+    button.primary { border: 1px solid var(--accent); background: var(--accent); color: white; }
+    #stop { margin-left: auto; }
+    .meta { color: var(--muted); overflow-wrap: anywhere; }
+    #status { min-height: 1.5em; margin: 18px 0 4px; }
+    #progress { min-height: 1.5em; color: var(--muted); font-variant-numeric: tabular-nums; }
+    pre { margin: 0; padding: 14px 0; border-top: 1px solid var(--line); white-space: pre-wrap; overflow-wrap: anywhere; font: 13px/1.55 ui-monospace, monospace; }
+    @media (max-width: 560px) {
+      body { margin-top: 20px; padding-inline: 14px; }
+      #stop { margin-left: 0; }
+      .controls { align-items: stretch; }
+      .controls button, .controls select { flex: 1 1 42%; }
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>Sol High Throughput Experiment</h1>
+    <div class="controls" aria-label="Transport experiment controls">
+      <label for="payload">Payload</label>
+      <select id="payload">
+        <option value="8">8 MiB</option>
+        <option value="12" selected>12 MiB</option>
+        <option value="16">16 MiB</option>
+      </select>
+      <button class="primary" data-count="all">Run 1 / 2 / 4</button>
+      <button data-count="1">Run 1</button>
+      <button data-count="2">Run 2</button>
+      <button data-count="4">Run 4</button>
+      <button id="stop" disabled>Stop</button>
+    </div>
+
+    <h2>Environment</h2>
+    <p class="meta" id="environment"></p>
+    <p id="status" role="status" aria-live="polite">Ready</p>
+    <p id="progress" aria-live="polite"></p>
+
+    <h2>Results</h2>
+    <pre id="results">No trials yet.</pre>
+  </main>
+
+  <script>
+    (() => {
+      'use strict';
+
+      const MiB = 1024 * 1024;
+      const CHUNK_BYTES = 64 * 1024;
+      const MAX_BUFFERED_BYTES = 1024 * 1024;
+      const BUFFER_LOW_BYTES = 512 * 1024;
+      const SETUP_TIMEOUT_MS = 25000;
+      const OPEN_TIMEOUT_MS = 20000;
+      const TRANSFER_TIMEOUT_MS = 120000;
+      const STATS_TIMEOUT_MS = 5000;
+      const FNV_OFFSET = 0x811c9dc5;
+      const FNV_PRIME = 0x01000193;
+
+      const payloadSelect = document.querySelector('#payload');
+      const runButtons = [...document.querySelectorAll('[data-count]')];
+      const stopButton = document.querySelector('#stop');
+      const environment = document.querySelector('#environment');
+      const status = document.querySelector('#status');
+      const progress = document.querySelector('#progress');
+      const results = document.querySelector('#results');
+      let activeController = null;
+
+      function browserName() {
+        const brands = navigator.userAgentData?.brands;
+        if (brands?.length) {
+          return brands.filter(item => !/not.?a.?brand/i.test(item.brand))
+            .map(item => `${item.brand} ${item.version}`).join(', ');
+        }
+        const ua = navigator.userAgent;
+        const match = ua.match(/Edg\/[\d.]+|Chrome\/[\d.]+|Firefox\/[\d.]+|Version\/[\d.]+.*Safari/);
+        return match ? match[0] : ua;
+      }
+
+      function updateEnvironment() {
+        environment.textContent = `${browserName()} · visibility: ${document.visibilityState}${document.hidden ? ' (hidden)' : ''} · ${location.protocol}`;
+      }
+      document.addEventListener('visibilitychange', updateEnvironment);
+      updateEnvironment();
+
+      function abortReason(signal) {
+        return signal.reason instanceof Error ? signal.reason : new DOMException('Stopped', 'AbortError');
+      }
+
+      function withTimeout(value, timeoutMs, label, signal) {
+        if (signal?.aborted) return Promise.reject(abortReason(signal));
+        return new Promise((resolve, reject) => {
+          let settled = false;
+          const finish = (callback, result) => {
+            if (settled) return;
+            settled = true;
+            clearTimeout(timer);
+            signal?.removeEventListener('abort', onAbort);
+            callback(result);
+          };
+          const onAbort = () => finish(reject, abortReason(signal));
+          const timer = setTimeout(() => finish(reject, new Error(`${label} timed out after ${timeoutMs / 1000}s`)), timeoutMs);
+          signal?.addEventListener('abort', onAbort, { once: true });
+          if (signal?.aborted) onAbort();
+          Promise.resolve(value).then(
+            result => finish(resolve, result),
+            error => finish(reject, error)
+          );
+        });
+      }
+
+      function waitUntil(predicate, eventTargets, timeoutMs, label, signal, failure) {
+        return new Promise((resolve, reject) => {
+          let settled = false;
+          const listeners = [];
+          const cleanup = () => {
+            clearTimeout(timer);
+            signal?.removeEventListener('abort', onAbort);
+            for (const [target, type, handler] of listeners) target.removeEventListener(type, handler);
+          };
+          const finish = (callback, value) => {
+            if (settled) return;
+            settled = true;
+            cleanup();
+            callback(value);
+          };
+          const onAbort = () => finish(reject, abortReason(signal));
+          const check = event => {
+            try {
+              if (event?.type === 'error') throw new Error(`${label}: event error`);
+              if (event?.type === 'close') throw new Error(`${label}: closed before ready`);
+              const error = failure?.();
+              if (error) throw error;
+              if (predicate()) finish(resolve);
+            } catch (error) {
+              finish(reject, error);
+            }
+          };
+          const timer = setTimeout(() => finish(reject, new Error(`${label} timed out after ${timeoutMs / 1000}s`)), timeoutMs);
+          for (const [target, types] of eventTargets) {
+            for (const type of types) {
+              const handler = event => check(event);
+              target.addEventListener(type, handler);
+              listeners.push([target, type, handler]);
+            }
+          }
+          signal?.addEventListener('abort', onAbort, { once: true });
+          if (signal?.aborted) onAbort();
+          else check();
+        });
+      }
+
+      function fnvUpdate(hash, bytes) {
+        for (let i = 0; i < bytes.length; i++) hash = Math.imul(hash ^ bytes[i], FNV_PRIME) >>> 0;
+        return hash;
+      }
+
+      function expectedByte(laneIndex, offset) {
+        return (Math.imul((offset + 1) >>> 0, 31) + Math.imul(laneIndex + 1, 73) + (offset >>> 8) * 17 + (offset >>> 16)) & 255;
+      }
+
+      function formatMiB(bytes) {
+        return (bytes / MiB).toFixed(2);
+      }
+
+      function createAssociation(index) {
+        const pcA = new RTCPeerConnection({ iceServers: [] });
+        const pcB = new RTCPeerConnection({ iceServers: [] });
+        const tx = pcA.createDataChannel(`lane-${index + 1}`, { ordered: true });
+        const link = { index, pcA, pcB, tx, rx: null };
+        pcB.addEventListener('datachannel', event => {
+          link.rx = event.channel;
+          link.rx.binaryType = 'arraybuffer';
+        }, { once: true });
+        return link;
+      }
+
+      async function prepareAssociation(link, signal) {
+        const { pcA, pcB, tx } = link;
+        const offer = await withTimeout(pcA.createOffer(), SETUP_TIMEOUT_MS, `Lane ${link.index + 1} offer`, signal);
+        await withTimeout(pcA.setLocalDescription(offer), SETUP_TIMEOUT_MS, `Lane ${link.index + 1} local offer`, signal);
+        await waitUntil(
+          () => pcA.iceGatheringState === 'complete',
+          [[pcA, ['icegatheringstatechange']]],
+          SETUP_TIMEOUT_MS,
+          `Lane ${link.index + 1} ICE gathering`, signal
+        );
+        await withTimeout(pcB.setRemoteDescription(pcA.localDescription), SETUP_TIMEOUT_MS, `Lane ${link.index + 1} remote offer`, signal);
+        const answer = await withTimeout(pcB.createAnswer(), SETUP_TIMEOUT_MS, `Lane ${link.index + 1} answer`, signal);
+        await withTimeout(pcB.setLocalDescription(answer), SETUP_TIMEOUT_MS, `Lane ${link.index + 1} local answer`, signal);
+        await waitUntil(
+          () => pcB.iceGatheringState === 'complete',
+          [[pcB, ['icegatheringstatechange']]],
+          SETUP_TIMEOUT_MS,
+          `Lane ${link.index + 1} ICE gathering`, signal
+        );
+        await withTimeout(pcA.setRemoteDescription(pcB.localDescription), SETUP_TIMEOUT_MS, `Lane ${link.index + 1} remote answer`, signal);
+
+        const connectionEvents = [
+          [pcA, ['connectionstatechange', 'iceconnectionstatechange']],
+          [pcB, ['connectionstatechange', 'iceconnectionstatechange']]
+        ];
+        const badConnection = () => [pcA, pcB].some(pc => pc.connectionState === 'failed' || pc.iceConnectionState === 'failed')
+          ? new Error(`Lane ${link.index + 1} ICE connection failed`)
+          : null;
+        const opened = waitUntil(
+          () => tx.readyState === 'open',
+          [[tx, ['open', 'error', 'close']], ...connectionEvents],
+          OPEN_TIMEOUT_MS,
+          `Lane ${link.index + 1} send channel`, signal,
+          badConnection
+        );
+        const receivedChannel = waitUntil(
+          () => link.rx !== null,
+          [[pcB, ['datachannel']], ...connectionEvents],
+          OPEN_TIMEOUT_MS,
+          `Lane ${link.index + 1} receive channel`, signal,
+          badConnection
+        );
+        await Promise.all([opened, receivedChannel]);
+      }
+
+      function receiveLane(lane) {
+        lane.receivePromise = new Promise((resolve, reject) => {
+          lane.resolveReceive = resolve;
+          lane.rejectReceive = reject;
+        });
+        lane.receivePromise.catch(() => {});
+        lane.link.rx.addEventListener('message', event => {
+          if (lane.completed) return lane.rejectReceive(new Error(`Lane ${lane.index + 1} received data after completion`));
+          try {
+            if (!(event.data instanceof ArrayBuffer)) throw new Error(`Lane ${lane.index + 1} received a non-binary message`);
+            const bytes = new Uint8Array(event.data);
+            if (lane.receivedBytes + bytes.byteLength > lane.expectedBytes) throw new Error(`Lane ${lane.index + 1} exceeded its byte limit`);
+            for (let i = 0; i < bytes.length; i++) {
+              const offset = lane.receivedBytes + i;
+              if (bytes[i] !== expectedByte(lane.index, offset)) throw new Error(`Lane ${lane.index + 1} payload mismatch at byte ${offset}`);
+            }
+            lane.receivedHash = fnvUpdate(lane.receivedHash, bytes);
+            lane.receivedBytes += bytes.byteLength;
+            progress.textContent = lane.allLanes.map(item => `Lane ${item.index + 1}: ${formatMiB(item.receivedBytes)} / ${formatMiB(item.expectedBytes)} MiB`).join(' · ');
+            if (lane.receivedBytes === lane.expectedBytes) {
+              if (lane.receivedHash !== lane.expectedHash) throw new Error(`Lane ${lane.index + 1} FNV-1a mismatch`);
+              lane.completed = true;
+              lane.finishedAt = performance.now();
+              lane.resolveReceive();
+            }
+          } catch (error) {
+            lane.rejectReceive(error);
+          }
+        });
+        lane.link.rx.addEventListener('messageerror', () => lane.rejectReceive(new Error(`Lane ${lane.index + 1} message decode error`)));
+      }
+
+      async function sendLane(lane, timing, signal) {
+        const channel = lane.link.tx;
+        channel.bufferedAmountLowThreshold = BUFFER_LOW_BYTES;
+        let offset = 0;
+        while (offset < lane.expectedBytes) {
+          if (signal.aborted) throw abortReason(signal);
+          const size = Math.min(CHUNK_BYTES, lane.expectedBytes - offset);
+          while (channel.bufferedAmount + size > MAX_BUFFERED_BYTES) {
+            await waitUntil(
+              () => channel.bufferedAmount + size <= MAX_BUFFERED_BYTES,
+              [[channel, ['bufferedamountlow', 'error', 'close']]],
+              OPEN_TIMEOUT_MS,
+              `Lane ${lane.index + 1} backpressure`, signal
+            );
+          }
+          const chunk = new Uint8Array(size);
+          for (let i = 0; i < size; i++) chunk[i] = expectedByte(lane.index, offset + i);
+          lane.expectedHash = fnvUpdate(lane.expectedHash, chunk);
+          const sentAt = performance.now();
+          if (timing.firstSendAt === null) timing.firstSendAt = sentAt;
+          if (lane.firstSendAt === null) lane.firstSendAt = sentAt;
+          channel.send(chunk);
+          offset += size;
+        }
+      }
+
+      function selectedIcePath(stats) {
+        const entries = [...stats.values()];
+        const transports = entries.filter(item => item.type === 'transport' && item.selectedCandidatePairId);
+        let pair = transports.map(item => stats.get(item.selectedCandidatePairId)).find(Boolean);
+        if (!pair) pair = entries.find(item => item.type === 'candidate-pair' && (item.selected || (item.nominated && item.state === 'succeeded')));
+        if (!pair) return 'selected ICE path unavailable';
+        const local = stats.get(pair.localCandidateId);
+        const remote = stats.get(pair.remoteCandidateId);
+        const describe = candidate => {
+          if (!candidate) return 'unknown candidate';
+          const address = candidate.address || candidate.ip || 'address unavailable';
+          const port = candidate.port ? `:${candidate.port}` : '';
+          return `${candidate.candidateType || 'unknown'} ${address}${port}`;
+        };
+        const protocol = `${local?.protocol || '?'} → ${remote?.protocol || '?'}`;
+        const rtt = Number.isFinite(pair.currentRoundTripTime) ? `${(pair.currentRoundTripTime * 1000).toFixed(1)} ms` : 'unavailable';
+        return `ICE ${describe(local)} → ${describe(remote)} · protocol ${protocol} · RTT ${rtt}`;
+      }
+
+      async function laneStats(lane, signal) {
+        try {
+          const stats = await withTimeout(lane.link.pcA.getStats(), STATS_TIMEOUT_MS, `Lane ${lane.index + 1} stats`, signal);
+          return selectedIcePath(stats);
+        } catch (error) {
+          if (signal.aborted) throw error;
+          return `ICE stats unavailable (${error.message})`;
+        }
+      }
+
+      async function runTrial(count, payloadMiB, signal) {
+        status.textContent = `Preparing ${count} independent peer connection${count === 1 ? '' : 's'}…`;
+        progress.textContent = '';
+        const links = [];
+        let preparationTasks = [];
+        try {
+          for (let i = 0; i < count; i++) links.push(createAssociation(i));
+          preparationTasks = links.map(link => prepareAssociation(link, signal));
+          await Promise.all(preparationTasks);
+
+          const bytesPerLane = payloadMiB * MiB / count;
+          const lanes = links.map((link, index) => ({
+            index,
+            link,
+            expectedBytes: bytesPerLane,
+            receivedBytes: 0,
+            expectedHash: FNV_OFFSET,
+            receivedHash: FNV_OFFSET,
+            firstSendAt: null,
+            finishedAt: null,
+            completed: false
+          }));
+          for (const lane of lanes) lane.allLanes = lanes;
+          for (const lane of lanes) {
+            receiveLane(lane);
+          }
+
+          status.textContent = `Transferring ${payloadMiB} MiB across ${count} lane${count === 1 ? '' : 's'}…`;
+          const timing = { firstSendAt: null };
+          const sendTasks = lanes.map(lane => sendLane(lane, timing, signal));
+          await withTimeout(
+            Promise.all([Promise.all(sendTasks), Promise.all(lanes.map(lane => lane.receivePromise))]),
+            TRANSFER_TIMEOUT_MS,
+            'Trial transfer', signal
+          ).catch(async error => {
+            if (!signal.aborted) activeController?.abort(error);
+            await Promise.allSettled(sendTasks);
+            throw error;
+          });
+
+          const allReceivedAt = Math.max(...lanes.map(lane => lane.finishedAt));
+          const elapsedSeconds = (allReceivedAt - timing.firstSendAt) / 1000;
+          const totalBytes = payloadMiB * MiB;
+          const aggregateRate = totalBytes / MiB / elapsedSeconds;
+          const paths = await Promise.all(lanes.map(lane => laneStats(lane, signal)));
+          return {
+            count,
+            payloadMiB,
+            elapsedSeconds,
+            aggregateRate,
+            lanes: lanes.map((lane, index) => {
+              const laneSeconds = (lane.finishedAt - lane.firstSendAt) / 1000;
+              return {
+                bytes: lane.receivedBytes,
+                expectedBytes: lane.expectedBytes,
+                rate: lane.expectedBytes / MiB / laneSeconds,
+                hash: lane.receivedHash.toString(16).padStart(8, '0'),
+                expectedHash: lane.expectedHash.toString(16).padStart(8, '0'),
+                valid: lane.receivedBytes === lane.expectedBytes && lane.receivedHash === lane.expectedHash,
+                path: paths[index],
+                ordered: lane.link.tx.ordered,
+                reliable: lane.link.tx.maxRetransmits === null && lane.link.tx.maxPacketLifeTime === null
+              };
+            })
+          };
+        } catch (error) {
+          if (!signal.aborted) activeController?.abort(error);
+          await Promise.allSettled(preparationTasks);
+          throw error;
+        } finally {
+          for (const link of links) {
+            try { link.tx.close(); } catch {}
+            try { link.rx?.close(); } catch {}
+            try { link.pcA.close(); } catch {}
+            try { link.pcB.close(); } catch {}
+          }
+        }
+      }
+
+      function formatResult(trial) {
+        const lines = [
+          `${trial.count} association${trial.count === 1 ? '' : 's'} · ${trial.payloadMiB} MiB total`,
+          `All receive: ${trial.elapsedSeconds.toFixed(3)} s · aggregate: ${trial.aggregateRate.toFixed(2)} MiB/s`
+        ];
+        trial.lanes.forEach((lane, index) => {
+          lines.push(`Lane ${index + 1}: ${formatMiB(lane.bytes)} / ${formatMiB(lane.expectedBytes)} MiB · ${lane.rate.toFixed(2)} MiB/s · ${lane.ordered ? 'ordered' : 'unordered'}, ${lane.reliable ? 'reliable' : 'unreliable'} · FNV-1a ${lane.hash} / ${lane.expectedHash} · ${lane.valid ? 'verified' : 'INVALID'}`);
+          lines.push(`  ${lane.path}`);
+        });
+        return lines.join('\n');
+      }
+
+      function setBusy(busy) {
+        runButtons.forEach(button => { button.disabled = busy; });
+        payloadSelect.disabled = busy;
+        stopButton.disabled = !busy;
+      }
+
+      async function runCounts(counts) {
+        if (activeController) return;
+        if (typeof RTCPeerConnection !== 'function') {
+          status.textContent = 'RTCPeerConnection is unavailable in this browser.';
+          return;
+        }
+        const controller = new AbortController();
+        activeController = controller;
+        const payloadMiB = Number(payloadSelect.value);
+        const payloadBytes = payloadMiB * MiB;
+        if (![8, 12, 16].includes(payloadMiB) || payloadBytes % Math.max(...counts) !== 0) {
+          status.textContent = 'Invalid payload selection.';
+          activeController = null;
+          return;
+        }
+        setBusy(true);
+        results.textContent = '';
+        try {
+          for (const count of counts) {
+            const trial = await runTrial(count, payloadMiB, controller.signal);
+            const report = formatResult(trial);
+            results.textContent += `${results.textContent ? '\n\n' : ''}${report}`;
+          }
+          status.textContent = 'Complete';
+        } catch (error) {
+          status.textContent = error.name === 'AbortError' && controller.signal.reason?.message === 'Stopped by user'
+            ? 'Stopped'
+            : `Trial failed: ${error.message || error}`;
+        } finally {
+          activeController = null;
+          setBusy(false);
+        }
+      }
+
+      runButtons.forEach(button => {
+        button.addEventListener('click', () => {
+          const value = button.dataset.count;
+          runCounts(value === 'all' ? [1, 2, 4] : [Number(value)]);
+        });
+      });
+      stopButton.addEventListener('click', () => {
+        activeController?.abort(new DOMException('Stopped by user', 'AbortError'));
+      });
+    })();
+  </script>
+</body>
+</html>
