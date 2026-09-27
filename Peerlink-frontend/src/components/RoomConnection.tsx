@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { LogIn, Hash, Clock, Database, Zap, Users, UserPlus } from "lucide-react";
+import { LogIn, Hash, Clock, Database, Zap, Users, UserPlus, Copy, Check } from "lucide-react";
 import { ConnectionIndicator } from "./ConnectionIndicator";
 import { Avatar } from "./Avatar";
 import type { ConnectionType, RoomType } from "../types";
@@ -33,6 +33,22 @@ export function RoomConnection({
     const [inputValue, setInputValue] = useState(roomId);
     const [isWaiting, setIsWaiting] = useState(false);
     const [selectedRoomType, setSelectedRoomType] = useState<RoomType>("persistent");
+    const [copiedRoomId, setCopiedRoomId] = useState<string | null>(null);
+    const [copyError, setCopyError] = useState(false);
+
+    const handleCopyRoomId = async (id: string) => {
+        const value = id.trim();
+        if (!value) return;
+
+        try {
+            await navigator.clipboard.writeText(value);
+            setCopiedRoomId(value);
+            setCopyError(false);
+        } catch {
+            setCopiedRoomId(null);
+            setCopyError(true);
+        }
+    };
 
     const handleJoin = () => {
         if (inputValue.trim() && !isWaiting && !connected) {
@@ -50,6 +66,8 @@ export function RoomConnection({
 
     const handleRoomTypeChange = (type: RoomType) => {
         setSelectedRoomType(type);
+        setCopiedRoomId(null);
+        setCopyError(false);
         if (type === "temporary") {
             const newRoomId = generateRoomId();
             setInputValue(newRoomId);
@@ -87,7 +105,16 @@ export function RoomConnection({
                             <Avatar avatarId={avatar} size="sm" />
                             <div className="room-id-display">
                                 <span className="text-sm text-gray-400">Room: </span>
-                                <span className="text-sm font-mono text-white">{roomId}</span>
+                                <span className="room-id-value text-sm font-mono text-white">{roomId}</span>
+                                <button
+                                    type="button"
+                                    className="room-id-copy-btn"
+                                    onClick={() => void handleCopyRoomId(roomId)}
+                                    aria-label={copiedRoomId === roomId ? "Room ID copied" : "Copy room ID"}
+                                    title={copiedRoomId === roomId ? "Copied" : "Copy room ID"}
+                                >
+                                    {copiedRoomId === roomId ? <Check size={16} /> : <Copy size={16} />}
+                                </button>
                             </div>
                         </div>
                         
@@ -98,6 +125,8 @@ export function RoomConnection({
                             </div>
                         )}
                     </div>
+
+                    {copyError && <p className="room-copy-error" role="status">Could not copy the room ID. Please select and copy it manually.</p>}
 
                     <ConnectionIndicator connected={connected} connectionType={connectionType} />
                 </div>
@@ -183,13 +212,28 @@ export function RoomConnection({
                                     onChange={(e) => {
                                         setInputValue(e.target.value);
                                         onRoomIdChange(e.target.value);
+                                        setCopiedRoomId(null);
+                                        setCopyError(false);
                                     }}
                                     onKeyPress={handleKeyPress}
-                                    className="room-input"
+                                    className="room-input room-input-copyable"
                                     disabled={isWaiting}
                                 />
+                                <button
+                                    type="button"
+                                    className="room-input-copy-btn"
+                                    onClick={() => void handleCopyRoomId(inputValue)}
+                                    disabled={!inputValue.trim()}
+                                    aria-label={copiedRoomId === inputValue.trim() ? "Room ID copied" : "Copy room ID"}
+                                    title={copiedRoomId === inputValue.trim() ? "Copied" : "Copy room ID"}
+                                >
+                                    {copiedRoomId === inputValue.trim() ? <Check size={16} /> : <Copy size={16} />}
+                                    <span>{copiedRoomId === inputValue.trim() ? "Copied" : "Copy"}</span>
+                                </button>
                             </div>
                         </div>
+
+                        {copyError && <p className="room-copy-error" role="status">Could not copy the room ID. Please select and copy it manually.</p>}
 
                         <button 
                             onClick={handleJoin}

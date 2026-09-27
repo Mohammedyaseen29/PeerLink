@@ -361,6 +361,53 @@ body {
     color: var(--fg-muted);
 }
 
+.room-input.room-input-copyable {
+    padding-right: 6.25rem;
+}
+
+.room-input-copy-btn {
+    position: absolute;
+    top: 50%;
+    right: 6px;
+    transform: translateY(-50%);
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 4px;
+    min-height: 32px;
+    padding: 0 10px;
+    background: var(--bg-elevated);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-pill);
+    color: var(--fg-secondary);
+    font: inherit;
+    font-size: 0.75rem;
+    cursor: pointer;
+}
+
+.room-input-copy-btn:hover:not(:disabled),
+.room-id-copy-btn:hover {
+    color: var(--fg);
+    border-color: var(--border-hover);
+}
+
+.room-input-copy-btn:focus-visible,
+.room-id-copy-btn:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+}
+
+.room-input-copy-btn:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+}
+
+.room-copy-error {
+    color: var(--danger);
+    font-size: 0.75rem;
+    text-align: center;
+}
+
 .room-mode-selection {
     text-align: center;
     padding: var(--spacing-md);
@@ -474,11 +521,35 @@ body {
     display: flex;
     align-items: center;
     gap: var(--spacing-xs);
+    min-width: 0;
+    max-width: 100%;
     padding: var(--spacing-sm) var(--spacing-md);
     background: var(--bg-secondary);
     border-radius: var(--radius-pill);
     border: 1px solid var(--border);
     font-family: inherit;
+}
+
+.room-id-value {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.room-id-copy-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+    width: 28px;
+    height: 28px;
+    padding: 0;
+    background: transparent;
+    border: 1px solid transparent;
+    border-radius: var(--radius-pill);
+    color: var(--fg-secondary);
+    cursor: pointer;
 }
 
 .temp-room-header {
@@ -2093,6 +2164,8 @@ body {
     display: flex;
     align-items: center;
     gap: var(--spacing-sm);
+    min-width: 0;
+    max-width: 100%;
 }
 
 /* ========================================
