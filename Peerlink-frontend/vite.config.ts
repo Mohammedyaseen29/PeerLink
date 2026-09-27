@@ -42,7 +42,7 @@ export default defineConfig({
         ]
       },
       injectManifest: {
-        injectionPoint: 'sw.__WB_MANIFEST',
+        injectionPoint: 'self.__WB_MANIFEST',
         globPatterns: ['**/*.{js,css,html,ico,png,svg,woff2}'],
         maximumFileSizeToCacheInBytes: 2 * 1024 * 1024
       }

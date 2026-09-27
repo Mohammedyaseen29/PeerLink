@@ -43,7 +43,7 @@ type PendingRemoteRange = {
     timer: number;
     signal: AbortSignal;
     abort: () => void;
-    output?: Uint8Array;
+    output?: Uint8Array<ArrayBuffer>;
     size?: number;
     mimeType?: string;
     length?: number;

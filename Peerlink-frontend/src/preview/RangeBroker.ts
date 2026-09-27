@@ -55,13 +55,18 @@ function validateResponse(response: PreviewRangeResponse, request: PreviewRangeR
 /** Bridges service-worker range requests to the active peer range provider. */
 export class RangeBroker {
     private readonly pending = new Map<string, PendingRange>();
+    private readonly provideRange: (request: PreviewRangeRequest, signal: AbortSignal) => Promise<PreviewRangeResponse>;
+    private readonly onError?: (message: string) => void;
     private started = false;
     private disposed = false;
 
     constructor(
-        private readonly provideRange: (request: PreviewRangeRequest, signal: AbortSignal) => Promise<PreviewRangeResponse>,
-        private readonly onError?: (message: string) => void
-    ) {}
+        provideRange: (request: PreviewRangeRequest, signal: AbortSignal) => Promise<PreviewRangeResponse>,
+        onError?: (message: string) => void
+    ) {
+        this.provideRange = provideRange;
+        this.onError = onError;
+    }
 
     start(): void {
         if (this.started || this.disposed || typeof navigator === "undefined" || !navigator.serviceWorker) return;

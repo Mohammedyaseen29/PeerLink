@@ -251,7 +251,7 @@ registerRoute(
 )
 
 cleanupOutdatedCaches()
-precacheAndRoute(sw.__WB_MANIFEST)
+precacheAndRoute((self as unknown as PeerLinkServiceWorker).__WB_MANIFEST)
 registerRoute(new NavigationRoute(createHandlerBoundToURL('index.html')))
 
 for (const [host, cacheName] of [
