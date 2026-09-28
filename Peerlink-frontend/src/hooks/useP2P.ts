@@ -211,10 +211,10 @@ export function useP2P() {
     chatOpen.current = isChatOpen;
 
     // React may defer/replay updater callbacks. Keep protocol state outside them.
-    const changeQueue = useCallback((update: (files: QueuedFile[]) => QueuedFile[]) => {
+    const changeQueue = useCallback((update: (files: QueuedFile[]) => QueuedFile[], publishCatalog = false) => {
         queue.current = update(queue.current);
         if (live.current) setSendQueue(queue.current);
-        publishCatalogRef.current();
+        if (publishCatalog) publishCatalogRef.current();
     }, []);
     const replaceReceivedFiles = useCallback((files: FileMetadata[]) => {
         receivedFilesRef.current = files.filter(file => file.status === 'complete' && file.mimeType !== 'send_state');
@@ -289,15 +289,16 @@ export function useP2P() {
         const transport = engine.current;
         if (!live.current || active.current || !transport || data.current?.readyState !== 'open' || control.current?.readyState !== 'open') return;
         const file = queue.current.find(item => item.status === 'pending');
-        if (!file) return;
+        if (!file) { transport.releaseIdleWorker(); return; }
         active.current = file.id;
         changeQueue(files => files.map(item => item.id === file.id ? { ...item, status: 'sending', startTime: Date.now(), progress: 0, bytesTransferred: 0 } : item));
+        const hasQueuedNext = queue.current.some(item => item.id !== file.id && item.status === 'pending');
         void transport.send(file.file, file.id, bytes => {
             changeQueue(files => files.map(item => item.id === file.id ? {
                 ...item, bytesTransferred: bytes, lastSentChunk: Math.ceil(bytes / CHUNK_SIZE) - 1,
                 progress: file.file.size ? Math.min(99, Math.floor(bytes / file.file.size * 100)) : 0,
             } : item));
-        }).then(() => {
+        }, hasQueuedNext).then(() => {
             changeQueue(files => files.map(item => item.id === file.id ? { ...item, status: 'sent', progress: 100, bytesTransferred: file.file.size } : item));
         }).catch(error => {
             if (!live.current || !queue.current.some(item => item.id === file.id)) return;
@@ -792,7 +793,7 @@ export function useP2P() {
             return { file, id, status: 'pending' as const, progress: 0, bytesTransferred: 0,
                 lastSentChunk: -1, totalChunks: Math.ceil(file.size / CHUNK_SIZE) };
         });
-        changeQueue(previous => [...previous, ...items]);
+        changeQueue(previous => [...previous, ...items], true);
         startNext.current();
     };
     const pauseSending = (id: string) => {
@@ -804,7 +805,7 @@ export function useP2P() {
             const usedIds = new Set(queue.current.filter(file => file.id !== id).map(file => file.id));
             let replacementId = generateId();
             while (usedIds.has(replacementId)) replacementId = generateId();
-            changeQueue(files => files.map(file => file.id === id ? { ...file, id: replacementId, status: 'pending', progress: 0, bytesTransferred: 0 } : file));
+            changeQueue(files => files.map(file => file.id === id ? { ...file, id: replacementId, status: 'pending', progress: 0, bytesTransferred: 0 } : file), true);
             startNext.current();
             return;
         }
@@ -813,11 +814,11 @@ export function useP2P() {
         engine.current?.resume(id);
     };
     const removeFromQueue = async (id: string) => {
-        changeQueue(files => files.filter(file => file.id !== id));
+        changeQueue(files => files.filter(file => file.id !== id), true);
         engine.current?.cancel(id);
     };
     const clearAllQueue = async () => {
-        changeQueue(() => []);
+        changeQueue(() => [], true);
         if (active.current) engine.current?.cancel(active.current);
     };
     const downloadFile = async (file: FileMetadata) => {

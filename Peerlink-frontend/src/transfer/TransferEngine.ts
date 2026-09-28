@@ -17,6 +17,7 @@ export type TransferEvents = {
 
 export class TransferEngine {
     private worker: Worker | null = null;
+    private workerIdleTimer: number | undefined;
     private requestId = 0;
     private reads = new Map<number, { resolve: (packets: ArrayBuffer[]) => void; reject: (error: Error) => void; timer: number }>();
     private outgoing: Outgoing | null = null;
@@ -26,7 +27,7 @@ export class TransferEngine {
     private controlTasks: Promise<void> = Promise.resolve();
     readonly metrics = {
         peakBufferedBytes: 0, peakReceiveBytes: 0, receivedBytes: 0, sentBytes: 0,
-        activeWorkers: 0, pendingReads: 0, disposed: false,
+        activeWorkers: 0, workerStarts: 0, pendingReads: 0, disposed: false,
         readAwaitMs: 0, readyWaitMs: 0, channelWaitMs: 0, creditWaitMs: 0, pausedWaitMs: 0,
         hashMs: 0, storageMs: 0, storedBatches: 0, storedChunks: 0,
     };
@@ -169,10 +170,13 @@ export class TransferEngine {
     }
 
     private async finishIncoming(incoming: Incoming) {
+        const needsPersistence = incoming.meta.status !== 'complete';
         incoming.meta.status = 'complete';
-        const storageStarted = performance.now();
-        try { await saveMetaData(incoming.meta); }
-        finally { this.metrics.storageMs += performance.now() - storageStarted; }
+        if (needsPersistence) {
+            const storageStarted = performance.now();
+            try { await saveMetaData(incoming.meta); }
+            finally { this.metrics.storageMs += performance.now() - storageStarted; }
+        }
         if (incoming.cancelled || this.disposed) return;
         this.events.received({ ...incoming.meta });
         this.message({ type: 'transfer_complete', fileId: incoming.meta.fileId, committed: incoming.committed });
@@ -195,14 +199,18 @@ export class TransferEngine {
                 } finally { this.metrics.hashMs += performance.now() - hashStarted; }
                 if (incoming.cancelled || this.disposed) return;
                 const committed = incoming.committed + batch.length;
+                const completesFile = committed === incoming.meta.totalChunks;
                 const storageStarted = performance.now();
-                try { await saveChunks(incoming.meta.fileId, batch, { ...incoming.meta, receivedChunks: committed }); }
+                try { await saveChunks(incoming.meta.fileId, batch, {
+                    ...incoming.meta, receivedChunks: committed, status: completesFile ? 'complete' : 'receiving',
+                }); }
                 finally { this.metrics.storageMs += performance.now() - storageStarted; }
                 this.metrics.storedBatches++;
                 this.metrics.storedChunks += batch.length;
                 if (incoming.cancelled || this.disposed) return;
                 incoming.committed = committed;
                 incoming.meta.receivedChunks = committed;
+                if (completesFile) incoming.meta.status = 'complete';
                 this.metrics.receivedBytes += batch.reduce((n, packet) => n + packet.data.byteLength, 0);
                 this.events.receiving(incoming.meta, Math.min(committed * CHUNK_SIZE, incoming.meta.size));
                 if (committed === incoming.meta.totalChunks) await this.finishIncoming(incoming);
@@ -215,6 +223,8 @@ export class TransferEngine {
     }
 
     private getWorker() {
+        clearTimeout(this.workerIdleTimer);
+        this.workerIdleTimer = undefined;
         if (this.worker) return this.worker;
         const worker = new Worker(new URL('../workers/transferWorker.ts', import.meta.url), { type: 'module' });
         worker.onmessage = ({ data }) => {
@@ -228,6 +238,7 @@ export class TransferEngine {
         worker.onerror = () => this.clearWorker(new Error('File reader failed'));
         this.worker = worker;
         this.metrics.activeWorkers = 1;
+        this.metrics.workerStarts++;
         return worker;
     }
     private read(out: Outgoing, start: number, count: number) {
@@ -243,6 +254,8 @@ export class TransferEngine {
         });
     }
     private clearWorker(error = new Error('Transfer stopped')) {
+        clearTimeout(this.workerIdleTimer);
+        this.workerIdleTimer = undefined;
         this.worker?.terminate();
         this.worker = null;
         this.metrics.activeWorkers = 0;
@@ -251,7 +264,7 @@ export class TransferEngine {
         this.metrics.pendingReads = 0;
     }
 
-    async send(file: File, id: string, progress: (bytes: number) => void) {
+    async send(file: File, id: string, progress: (bytes: number) => void, keepWorkerForNext = false) {
         if (this.outgoing || this.disposed) throw new Error('Sender unavailable');
         const out: Outgoing = { id, file, next: 0, committed: 0, ready: false, paused: false, done: false, progress, lastUpdate: 0 };
         this.outgoing = out;
@@ -327,9 +340,22 @@ export class TransferEngine {
             if (this.control.readyState === 'open') this.message({ type: 'transfer_cancel', fileId: id });
             throw error;
         } finally {
-            this.clearWorker();
+            if (out.done && keepWorkerForNext && this.worker) {
+                // Release the source File while retaining the worker for the next queued item.
+                this.worker.postMessage({ type: 'clear' });
+                this.workerIdleTimer = window.setTimeout(() => {
+                    this.workerIdleTimer = undefined;
+                    this.clearWorker();
+                }, 10000);
+            } else this.clearWorker();
             if (this.outgoing === out) this.outgoing = null;
         }
+    }
+    releaseIdleWorker() {
+        if (this.outgoing) return;
+        clearTimeout(this.workerIdleTimer);
+        this.workerIdleTimer = undefined;
+        this.clearWorker();
     }
     pause(id: string) { if (this.outgoing?.id === id) this.outgoing.paused = true; }
     resume(id: string) { if (this.outgoing?.id === id) { this.outgoing.paused = false; this.wake(); } }
