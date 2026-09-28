@@ -2,7 +2,7 @@ import { saveMetaData, saveChunks, deleteFile, type FileMetadata } from '../Prog
 
 export const CHUNK_SIZE = 64 * 1024 - 128;
 const HIGH = 2 * 1024 * 1024;
-const LOW = 512 * 1024;
+const LOW = HIGH - 2 * CHUNK_SIZE;
 const WINDOW = 128; // At most 8 MiB sent but not committed, including SCTP queues.
 const BATCH = 16;
 const encoder = new TextDecoder();
@@ -34,9 +34,11 @@ export class TransferEngine {
     private data: RTCDataChannel;
     private control: RTCDataChannel;
     private room: () => string;
+    private roomType: () => "persistent" | "temporary";
     private events: TransferEvents;
-    constructor(data: RTCDataChannel, control: RTCDataChannel, room: () => string, events: TransferEvents) {
-        this.data = data; this.control = control; this.room = room; this.events = events;
+    constructor(data: RTCDataChannel, control: RTCDataChannel, room: () => string, events: TransferEvents,
+        roomType: () => "persistent" | "temporary" = () => "persistent") {
+        this.data = data; this.control = control; this.room = room; this.events = events; this.roomType = roomType;
         data.binaryType = 'arraybuffer';
         data.bufferedAmountLowThreshold = LOW;
         data.addEventListener('bufferedamountlow', this.wake);
@@ -83,7 +85,7 @@ export class TransferEngine {
                 !Number.isSafeInteger(size) || Number(size) < 0 || chunkSize !== CHUNK_SIZE ||
                 totalChunks !== Math.ceil(Number(size) / CHUNK_SIZE) || msg.version !== 3) throw new Error('Incompatible transfer metadata');
             const meta: FileMetadata = { fileId, name, size: Number(size), totalChunks: Number(totalChunks), chunkSize: CHUNK_SIZE,
-                roomId: this.room(), path: typeof msg.path === 'string' ? msg.path : undefined,
+                roomId: this.room(), roomType: this.roomType(), path: typeof msg.path === 'string' ? msg.path : undefined,
                 mimeType: typeof msg.mimeType === 'string' ? msg.mimeType : '', receivedChunks: 0, status: 'receiving', createdAt: Date.now() };
             const incoming: Incoming = { meta, next: 0, committed: 0, queue: [], writing: false, cancelled: false };
             this.incoming = incoming;

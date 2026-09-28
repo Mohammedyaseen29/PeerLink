@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { clearRoom as clearRoomDB, getFilesInRoom, getUpdatePreviewUrl, readFileRange, streamFileToDownload, type FileMetadata } from '../ProgressDB';
+import { clearRoom as clearRoomDB, clearTemporaryFiles, deleteFile as deleteStoredFile, getFilesInRoom, getUpdatePreviewUrl, readFileRange, streamFileToDownload, type FileMetadata } from '../ProgressDB';
 import { CHUNK_SIZE, TransferEngine } from '../transfer/TransferEngine';
 import type { QueuedFile, ConnectionType, ReceivingFile, ChatMessage, Settings, RoomType } from '../types';
 import { generateId } from '../utils/helpers';
@@ -167,6 +167,7 @@ export function useP2P() {
     const [connectionType, setConnectionType] = useState<ConnectionType>('disconnected');
     const [inRoom, setInRoom] = useState(false);
     const [hasPeer, setHasPeer] = useState(false);
+    const [signalingStatus, setSignalingStatus] = useState<'idle' | 'connecting' | 'waiting' | 'negotiating' | 'offline'>('idle');
     const [connectionFormKey, setConnectionFormKey] = useState(0);
     const [sendQueue, setSendQueue] = useState<QueuedFile[]>([]);
     const [receivedFiles, setReceivedFiles] = useState<FileMetadata[]>([]);
@@ -178,7 +179,7 @@ export function useP2P() {
     const [username] = useState(getUsername);
     const [isChatOpen, setIsChatOpen] = useState(false);
     const [isSettingsOpen, setIsSettingsOpen] = useState(false);
-    const [toast, setToast] = useState<{ message: string; visible: boolean } | null>(null);
+    const [toast, setToast] = useState<{ message: string; kind: 'success' | 'error' | 'info' } | null>(null);
     const queue = useRef<QueuedFile[]>([]);
     const active = useRef<string | null>(null);
     const engine = useRef<TransferEngine | null>(null);
@@ -224,11 +225,11 @@ export function useP2P() {
         onlineFilesRef.current = files;
         if (live.current) setOnlineFiles(files);
     }, []);
-    const showToast = useCallback((message: string) => {
+    const showToast = useCallback((message: string, kind: 'success' | 'error' | 'info' = 'error') => {
         if (!live.current) return;
         clearTimeout(toastTimer.current);
-        setToast({ message, visible: true });
-        toastTimer.current = window.setTimeout(() => setToast(null), 6000);
+        setToast({ message, kind });
+        toastTimer.current = window.setTimeout(() => setToast(null), 4500);
     }, []);
 
     const buildSharedCatalog = useCallback((): FileMetadata[] => {
@@ -535,8 +536,17 @@ export function useP2P() {
             if (previewBroker.current === broker) previewBroker.current = null;
             disconnectPeer();
             if (ws.current) { ws.current.onclose = null; ws.current.onmessage = null; ws.current.close(); ws.current = null; }
+            if (temporary.current && currentRoom.current) void clearTemporaryFiles(currentRoom.current).catch(() => undefined);
         };
     }, [disconnectPeer, requestRemoteRange, showToast]);
+
+    useEffect(() => {
+        const onPageHide = () => {
+            if (temporary.current && currentRoom.current) void clearTemporaryFiles(currentRoom.current).catch(() => undefined);
+        };
+        window.addEventListener('pagehide', onPageHide);
+        return () => window.removeEventListener('pagehide', onPageHide);
+    }, []);
 
     const identifyConnection = async (peer: RTCPeerConnection) => {
         const stats = await peer.getStats();
@@ -613,11 +623,12 @@ export function useP2P() {
                 if (options.current.autoDownload) void streamFileToDownload(meta.fileId, undefined, { picker: false }).catch(error => showToast(String(error)));
             },
             error: message => { if (live.current) setCurrentReceiving(null); showToast(message); },
-        });
+        }, () => temporary.current ? 'temporary' : 'persistent');
         engine.current = transport;
         const opened = () => {
             if (pc.current !== peer || commands.readyState !== 'open' || chunks.readyState !== 'open') return;
             setConnected(true);
+            setSignalingStatus('waiting');
             void identifyConnection(peer).catch(() => undefined);
             publishCatalogRef.current();
             startNext.current();
@@ -663,9 +674,18 @@ export function useP2P() {
 
     const join = (newRoomId: string, newRoomType: RoomType = 'persistent') => {
         if (!newRoomId.trim() || ws.current) return;
+        const reopening = inRoom && currentRoom.current === newRoomId.trim();
         currentRoom.current = newRoomId.trim(); temporary.current = newRoomType === 'temporary';
         setRoomId(currentRoom.current); setRoomType(newRoomType);
-        void getFilesInRoom(currentRoom.current).then(files => { if (live.current) replaceReceivedFiles(files); }).catch(error => showToast(String(error)));
+        setInRoom(true); setHasPeer(false); setSignalingStatus('connecting');
+        const room = currentRoom.current;
+        if (!reopening) replaceReceivedFiles([]);
+        void getFilesInRoom(room).then(files => {
+            if (live.current && currentRoom.current === room && !temporary.current) {
+                replaceReceivedFiles(files.filter(file => file.roomType !== 'temporary'));
+            }
+        }).catch(error => showToast(String(error)));
+        if (newRoomType === 'persistent') void navigator.storage?.persist?.().catch(() => undefined);
         const socket = new WebSocket(import.meta.env.VITE_SIGNALING_SERVER_URL);
         ws.current = socket;
         let signaling: Promise<void> = Promise.resolve();
@@ -680,10 +700,15 @@ export function useP2P() {
             ws.current = null;
             socket.onclose = null;
             try { socket.close(); } catch { /* The signaling socket has already closed. */ }
-            if (live.current) { setInRoom(false); setHasPeer(false); }
+            if (live.current) { setHasPeer(false); setSignalingStatus('offline'); }
+            if (temporary.current) {
+                void clearTemporaryFiles(room).then(() => { if (currentRoom.current === room) replaceReceivedFiles([]); })
+                    .catch(error => showToast(`Unable to remove temporary files: ${String(error)}`));
+                setInRoom(false);
+            }
         };
         socket.onopen = () => {
-            try { socket.send(JSON.stringify({ type: 'join', roomId: currentRoom.current, username })); }
+            try { socket.send(JSON.stringify({ type: 'join', roomId: room, roomType: newRoomType, username })); }
             catch { failSignaling('Unable to join the signaling server.'); }
         };
         socket.onerror = () => failSignaling('Unable to reach the signaling server.');
@@ -692,7 +717,12 @@ export function useP2P() {
             showToast(joinedRoom ? 'The signaling connection closed.' : 'The signaling connection ended before joining.');
             setConnectionFormKey(value => value + 1);
             disconnectPeer(); ws.current = null;
-            if (live.current) { setInRoom(false); setHasPeer(false); }
+            if (live.current) { setHasPeer(false); setSignalingStatus('offline'); }
+            if (temporary.current) {
+                void clearTemporaryFiles(room).then(() => { if (currentRoom.current === room) replaceReceivedFiles([]); })
+                    .catch(error => showToast(`Unable to remove temporary files: ${String(error)}`));
+                setInRoom(false);
+            }
         };
         socket.onmessage = ({ data: text }) => {
             signaling = signaling.then(async () => {
@@ -708,9 +738,24 @@ export function useP2P() {
                     failSignaling(messages[msg.code] || 'The signaling server rejected the room connection.');
                     return;
                 }
-                if (msg.type === 'joined') { joinedRoom = true; setInRoom(true); setHasPeer(msg.peerCount > 0); ensurePeer(); }
+                if (msg.type === 'joined') {
+                    joinedRoom = true;
+                    const confirmedType: RoomType = msg.roomType === 'temporary' ? 'temporary' : 'persistent';
+                    temporary.current = confirmedType === 'temporary';
+                    setRoomType(confirmedType);
+                    setInRoom(true); setHasPeer(msg.peerCount > 0);
+                    setSignalingStatus(msg.peerCount > 0 ? 'negotiating' : 'waiting');
+                    if (confirmedType === 'temporary') {
+                        await clearTemporaryFiles(room);
+                        replaceReceivedFiles([]);
+                    } else {
+                        const files = await getFilesInRoom(room);
+                        if (currentRoom.current === room) replaceReceivedFiles(files.filter(file => file.roomType !== 'temporary'));
+                    }
+                    ensurePeer();
+                }
                 if (msg.type === 'peer_joined') {
-                    setHasPeer(true); showToast(`${msg.username || 'Peer'} joined the room`);
+                    setHasPeer(true); setSignalingStatus('negotiating'); showToast(`${msg.username || 'Peer'} joined the room`, 'success');
                     const peer = ensurePeer();
                     await peer.setLocalDescription(await peer.createOffer());
                     socket.send(JSON.stringify({ type: 'offer', roomId: currentRoom.current, payload: peer.localDescription }));
@@ -729,11 +774,13 @@ export function useP2P() {
                     if (peer.remoteDescription) await peer.addIceCandidate(msg.payload); else candidates.push(msg.payload);
                 }
                 if (msg.type === 'peer_left' || msg.type === 'peer_left_room') {
-                    disconnectPeer(); candidates.length = 0; setHasPeer(false);
-                    if (temporary.current) { await clearRoomDB(currentRoom.current); replaceReceivedFiles([]); }
+                    disconnectPeer(); candidates.length = 0; setHasPeer(false); setSignalingStatus('waiting');
                 }
             }).catch(error => failSignaling(error instanceof Error ? error.message : String(error)));
         };
+    };
+    const retryConnection = () => {
+        if (currentRoom.current && !ws.current) join(currentRoom.current, temporary.current ? 'temporary' : 'persistent');
     };
 
     const addFilesToQueue = async (files: File[]) => {
@@ -780,8 +827,41 @@ export function useP2P() {
     };
     const clearRoom = async () => {
         if (window.confirm(`Delete all stored files from room "${currentRoom.current}"?`)) {
-            await clearRoomDB(currentRoom.current); replaceReceivedFiles([]);
+            try {
+                await clearRoomDB(currentRoom.current); replaceReceivedFiles([]);
+                showToast('Stored room files deleted.', 'success');
+            } catch (error) { showToast(String(error)); }
         }
+    };
+    const deleteReceivedFile = async (file: FileMetadata) => {
+        if (file.roomId !== currentRoom.current ||
+            !window.confirm(`Delete "${file.name}" from this device?`)) return;
+        try {
+            await deleteStoredFile(file.fileId);
+            replaceReceivedFiles(receivedFilesRef.current.filter(item => item.fileId !== file.fileId));
+            showToast('File deleted from this device.', 'success');
+        } catch (error) { showToast(String(error)); }
+    };
+    const leaveRoom = () => {
+        const room = currentRoom.current;
+        if (!room) return;
+        const wasTemporary = temporary.current;
+        const socket = ws.current;
+        ws.current = null;
+        if (socket) {
+            socket.onclose = null; socket.onmessage = null; socket.onerror = null;
+            if (socket.readyState === WebSocket.OPEN) {
+                try { socket.send(JSON.stringify({ type: 'leave', roomId: room })); } catch { /* Closing connection. */ }
+            }
+            socket.close();
+        }
+        disconnectPeer();
+        currentRoom.current = ''; temporary.current = false;
+        setRoomId(''); setRoomType('persistent'); setInRoom(false); setHasPeer(false); setSignalingStatus('idle');
+        setConnectionFormKey(value => value + 1);
+        queue.current = []; active.current = null; setSendQueue([]);
+        replaceReceivedFiles([]); replaceOnlineFiles([]); setChatMessages([]); setUnreadCount(0);
+        if (wasTemporary) void clearTemporaryFiles(room).catch(error => showToast(`Unable to remove temporary files: ${String(error)}`));
     };
     const openPreview = async (file: FileMetadata) => {
         if (!onlineFilesRef.current.some(onlineFile => onlineFile === file)) {
@@ -851,9 +931,9 @@ export function useP2P() {
             visibilityState: document.visibilityState,
         };
     };
-    return { roomId, roomType, connected, connectionType, sendQueue, receivedFiles, onlineFiles, currentReceiving, connectionFormKey,
+    return { roomId, roomType, connected, connectionType, signalingStatus, sendQueue, receivedFiles, onlineFiles, currentReceiving, connectionFormKey,
         chatMessages, unreadCount, settings, username, isChatOpen, isSettingsOpen, inRoom, hasPeer, toast,
-        setRoomId, join, addFilesToQueue, pauseSending, resumeSending, removeFromQueue, clearAllQueue,
-        downloadFile, clearRoom, openPreview, closePreview, sendChatMessage, markChatRead, updateSettings, setIsChatOpen,
-        setIsSettingsOpen, generateRoomId, dismissToast, transferMetrics: engine.current?.metrics, getTransferDiagnostics };
+        setRoomId, join, retryConnection, leaveRoom, addFilesToQueue, pauseSending, resumeSending, removeFromQueue, clearAllQueue,
+        downloadFile, clearRoom, deleteReceivedFile, openPreview, closePreview, sendChatMessage, markChatRead, updateSettings, setIsChatOpen,
+        setIsSettingsOpen, generateRoomId, dismissToast, notifyError: showToast, transferMetrics: engine.current?.metrics, getTransferDiagnostics };
 }

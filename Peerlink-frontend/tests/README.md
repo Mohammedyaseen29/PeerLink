@@ -8,6 +8,7 @@ The frontend signaling environment must point to `ws://localhost:8787`.
 
 - `/transfer-test.html`: click **Run integration tests**. Uses two actual React hooks, WebSocket signaling, real reliable WebRTC channels, file-reader workers, SHA-256, and IndexedDB. Default large file: 128 MiB plus 123 bytes.
 - `/transfer-test.html?quick`: same checks with an 8 MiB large file.
+- `/transfer-test.html?rooms`: checks persistent room reopen and preview without a peer, deletion, temporary type synchronization, and cleanup on leave.
 - `/tests/faults.html`: click **Run fault tests**. Injects corrupt hashes, invalid sequence numbers, and a buffer-full send failure through simulated channels, using the real transfer engine and worker.
 - `/tests/transport.html`: click **Compare packet sizes**. Measures raw local WebRTC without hashing, disk persistence, or application state.
 
@@ -28,7 +29,7 @@ These results do **not** demonstrate 16 MB/s or an improvement over the user's 1
 ## Implementation
 
 - One active outbound file per peer, with a pipelined worker reader; both peers can send simultaneously.
-- Approximately 64 KiB payloads, a 2 MiB DataChannel high-water mark, a 512 KiB low-water mark, and an 8 MiB receiver-credit bound. Reading ahead is limited to one additional approximately 1 MiB batch.
+- Approximately 64 KiB payloads, a 2 MiB DataChannel high-water mark, a low-water event near that mark for prompt refill, and an 8 MiB receiver-credit bound. Reading ahead is limited to one additional approximately 1 MiB batch.
 - Reliable ordered SCTP handles retransmission. Application acknowledgments report committed storage, not receipt into a JavaScript queue. No application retry timer resends chunks during pause/resume.
 - Worker slicing, SHA-256, and transferable packet buffers; receiver hash/sequence/size verification before batched IndexedDB commits.
 - Queue ownership outside React updater callbacks; completion requires receiver confirmation. Errors surface as failed transfers with explicit retry.

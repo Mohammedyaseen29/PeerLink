@@ -1,5 +1,5 @@
 export const DB_NAME = "PeerLink_files";
-export const DB_VERSION = 3;  
+export const DB_VERSION = 4;
 export const CHUNK_STORE = "chunks";
 export const PROGRESS_STORE = "progress";
 export const FILE_STORE = "files";
@@ -11,6 +11,7 @@ const PREVIEW_FILE_PREFIX = ".peerlink-preview-";
 export type FileMetadata = {
   fileId: string;
   roomId: string;
+  roomType?: "persistent" | "temporary";
   name: string;
   path?: string;
   size: number;
@@ -40,10 +41,10 @@ export function openDB(): Promise<IDBDatabase> {
       }
       
       // Create FILE_STORE if it doesn't exist - THIS WAS MISSING!
-      if (!db.objectStoreNames.contains(FILE_STORE)) {
-        const fileStore = db.createObjectStore(FILE_STORE, { keyPath: "fileId" });
-        fileStore.createIndex("roomId", "roomId", { unique: false });
-      }
+      const fileStore = db.objectStoreNames.contains(FILE_STORE)
+        ? request.transaction!.objectStore(FILE_STORE)
+        : db.createObjectStore(FILE_STORE, { keyPath: "fileId" });
+      if (!fileStore.indexNames.contains("roomId")) fileStore.createIndex("roomId", "roomId", { unique: false });
       
       // Remove old PROGRESS_STORE if upgrading from version 1
       if (oldVersion < 2) { 
@@ -341,14 +342,11 @@ export const streamFileToDownload = async (
 export async function getFilesInRoom(roomId: string): Promise<FileMetadata[]> {
   const db = await openDB();
   const tx = db.transaction(FILE_STORE, "readonly");
-  const store = tx.objectStore(FILE_STORE);
-
-  const req = store.getAll();
+  const req = tx.objectStore(FILE_STORE).index("roomId").getAll(IDBKeyRange.only(roomId));
 
   return new Promise((resolve, reject) => {
     req.onsuccess = () => {
-      const all = req.result as FileMetadata[];
-      resolve(all.filter(f => f.roomId === roomId));
+      resolve(req.result as FileMetadata[]);
     };
     req.onerror = () => reject(req.error);
   });
@@ -356,20 +354,9 @@ export async function getFilesInRoom(roomId: string): Promise<FileMetadata[]> {
 
 export async function deleteFile(fileId: string): Promise<void> {
   const db = await openDB();
-
-  // Delete metadata
-  const tx1 = db.transaction(FILE_STORE, "readwrite");
-  tx1.objectStore(FILE_STORE).delete(fileId);
-
-  await new Promise<void>((resolve, reject) => {
-    tx1.oncomplete = () => resolve();
-    tx1.onerror = () => reject(tx1.error);
-    tx1.onabort = () => reject(tx1.error ?? new DOMException("Transaction aborted", "AbortError"));
-  });
-
-  // Delete all chunks
-  const tx2 = db.transaction(CHUNK_STORE, "readwrite");
-  const store = tx2.objectStore(CHUNK_STORE);
+  const tx = db.transaction([FILE_STORE, CHUNK_STORE], "readwrite");
+  tx.objectStore(FILE_STORE).delete(fileId);
+  const store = tx.objectStore(CHUNK_STORE);
   const index = store.index("fileId");
 
   const cursorReq = index.openCursor(IDBKeyRange.only(fileId));
@@ -383,9 +370,9 @@ export async function deleteFile(fileId: string): Promise<void> {
   };
 
   await new Promise<void>((resolve, reject) => {
-    tx2.oncomplete = () => resolve();
-    tx2.onerror = () => reject(tx2.error);
-    tx2.onabort = () => reject(tx2.error ?? new DOMException("Transaction aborted", "AbortError"));
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+    tx.onabort = () => reject(tx.error ?? new DOMException("Transaction aborted", "AbortError"));
   });
 }
 
@@ -716,4 +703,18 @@ export async function clearRoom(roomId: string): Promise<void> {
   for (const file of files) {
     await deleteFile(file.fileId);
   }
+}
+
+/** Remove temporary transfers left by an interrupted browser session. */
+export async function clearTemporaryFiles(roomId?: string): Promise<void> {
+  const db = await openDB();
+  const tx = db.transaction(FILE_STORE, "readonly");
+  const req = roomId
+    ? tx.objectStore(FILE_STORE).index("roomId").getAll(IDBKeyRange.only(roomId))
+    : tx.objectStore(FILE_STORE).getAll();
+  const files = await new Promise<FileMetadata[]>((resolve, reject) => {
+    req.onsuccess = () => resolve(req.result as FileMetadata[]);
+    req.onerror = () => reject(req.error);
+  });
+  for (const file of files) if (file.roomType === "temporary") await deleteFile(file.fileId);
 }

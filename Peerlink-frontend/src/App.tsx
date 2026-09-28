@@ -12,6 +12,7 @@ import {
   SettingsModal,
 } from "./components";
 import { releasePreviewUrl, type FileMetadata } from "./ProgressDB";
+import { CircleAlert, CircleCheck, Info, LoaderCircle, RefreshCw, WifiOff, X } from "lucide-react";
 
 function App() {
   const {
@@ -19,6 +20,7 @@ function App() {
     roomType,
     connected,
     connectionType,
+    signalingStatus,
     sendQueue,
     receivedFiles,
     onlineFiles,
@@ -34,6 +36,8 @@ function App() {
     toast,
     setRoomId,
     join,
+    leaveRoom,
+    retryConnection,
     addFilesToQueue,
     pauseSending,
     resumeSending,
@@ -41,6 +45,7 @@ function App() {
     clearAllQueue,
     downloadFile,
     clearRoom,
+    deleteReceivedFile,
     openPreview,
     closePreview,
     sendChatMessage,
@@ -49,6 +54,7 @@ function App() {
     setIsSettingsOpen,
     generateRoomId,
     dismissToast,
+    notifyError,
   } = useP2P();
 
   const [previewFile, setPreviewFile] = useState<FileMetadata | null>(null);
@@ -70,7 +76,7 @@ function App() {
       setPreviewFile(file);
       setPreviewUrl(url);
     } catch (error) {
-      if (request === previewRequest.current) window.alert(error instanceof Error ? error.message : String(error));
+      if (request === previewRequest.current) notifyError(error instanceof Error ? error.message : String(error));
     }
   };
 
@@ -94,6 +100,13 @@ function App() {
     setPreviewUrl(null);
   }, [onlineFiles, previewFile, previewUrl, closePreview]);
 
+  useEffect(() => {
+    if (previewFile && !onlineFiles.some(file => file.fileId === previewFile.fileId) &&
+        !receivedFiles.some(file => file.fileId === previewFile.fileId)) handleClosePreview();
+  // Close a local preview if its stored file was deleted.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [receivedFiles, onlineFiles]);
+
   return (
     <div className="app-container">
       <main className="main-content">
@@ -111,9 +124,11 @@ function App() {
           roomId={roomId}
           onRoomIdChange={setRoomId}
           onJoin={join}
+          onLeave={() => { handleClosePreview(); leaveRoom(); }}
           connected={connected}
           inRoom={inRoom}
           connectionType={connectionType}
+          signalingStatus={signalingStatus}
           roomType={roomType}
           generateRoomId={generateRoomId}
           avatar={settings.avatar}
@@ -122,11 +137,15 @@ function App() {
         {inRoom && (
           <>
             {!connected && (
-              <div className="waiting-banner">
-                <div className="waiting-banner-content">
-                  <span className="waiting-banner-spinner">⟳</span>
-                  <span className="waiting-banner-text">Waiting for other user...</span>
+              <div className={`room-status ${signalingStatus === "offline" ? "room-status-offline" : ""}`} role="status" aria-live="polite">
+                <div className="room-status-icon">
+                  {signalingStatus === "offline" ? <WifiOff size={20} /> : <LoaderCircle size={20} className="room-status-spinner" />}
                 </div>
+                <div className="room-status-copy">
+                  <strong>{signalingStatus === "connecting" ? "Connecting to room" : signalingStatus === "negotiating" ? "Securing peer connection" : signalingStatus === "offline" ? "Room is offline" : "Waiting for your peer"}</strong>
+                  <span>{signalingStatus === "offline" ? "Stored files are ready to preview or download. Reconnect when you're ready to share." : signalingStatus === "negotiating" ? "Establishing a direct transfer path." : signalingStatus === "connecting" ? "Checking the room and loading saved files." : "Share the room ID to start transferring."}</span>
+                </div>
+                {signalingStatus === "offline" && <button type="button" className="room-status-retry" onClick={retryConnection}><RefreshCw size={15} /> Retry</button>}
               </div>
             )}
 
@@ -152,16 +171,18 @@ function App() {
               onlineFiles={onlineFiles}
               onDownload={downloadFile}
               onPreview={handlePreview}
+              onDelete={deleteReceivedFile}
               onClearRoom={clearRoom}
             />
           </>
         )}
 
-        {toast && toast.visible && (
-          <div className="toast-overlay" onClick={dismissToast}>
-            <div className="toast-body" onClick={(e) => e.stopPropagation()}>
-              <span className="toast-icon">✓</span>
+        {toast && (
+          <div className="toast-overlay">
+            <div className={`toast-body toast-${toast.kind}`} role={toast.kind === "error" ? "alert" : "status"}>
+              <span className="toast-icon">{toast.kind === "success" ? <CircleCheck size={20} /> : toast.kind === "info" ? <Info size={20} /> : <CircleAlert size={20} />}</span>
               <span className="toast-message-text">{toast.message}</span>
+              <button type="button" className="toast-dismiss" onClick={dismissToast} aria-label="Dismiss notification"><X size={16} /></button>
             </div>
           </div>
         )}

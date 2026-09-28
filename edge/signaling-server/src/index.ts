@@ -8,6 +8,7 @@ type Bindings = {
 type RoomSession = {
   roomId: string;
   username: string;
+  roomType: "persistent" | "temporary";
 };
 
 const MAX_ROOM_ID_LENGTH = 128;
@@ -57,15 +58,16 @@ export class SignalingRoom extends DurableObject {
 
     if (!data || typeof data !== "object" || Array.isArray(data)) return;
 
-    const { type, roomId, payload, username } = data as {
+    const { type, roomId, payload, username, roomType } = data as {
       type?: unknown;
       roomId?: unknown;
       payload?: unknown;
       username?: unknown;
+      roomType?: unknown;
     };
 
     if (type === "join") {
-      this.join(ws, roomId, username);
+      this.join(ws, roomId, username, roomType);
       return;
     }
 
@@ -97,7 +99,7 @@ export class SignalingRoom extends DurableObject {
     this.broadcastToRoom(session.roomId, { type: "peer_left", roomId: session.roomId }, ws);
   }
 
-  private join(ws: WebSocket, requestedRoomId: unknown, requestedUsername: unknown) {
+  private join(ws: WebSocket, requestedRoomId: unknown, requestedUsername: unknown, requestedRoomType: unknown) {
     const roomId = typeof requestedRoomId === "string" ? requestedRoomId.trim() : "";
     const existingSession = this.getSession(ws);
 
@@ -106,6 +108,7 @@ export class SignalingRoom extends DurableObject {
         this.send(ws, {
           type: "joined",
           roomId: existingSession.roomId,
+          roomType: existingSession.roomType,
           peerCount: this.countRoomSessions(existingSession.roomId, ws),
         });
       } else {
@@ -130,8 +133,14 @@ export class SignalingRoom extends DurableObject {
       return;
     }
 
+    const firstPeer = this.ctx.getWebSockets().find(client =>
+      client !== ws && client.readyState === 1 && this.getSession(client)?.roomId === roomId);
+    const roomType = firstPeer
+      ? this.getSession(firstPeer)!.roomType
+      : requestedRoomType === "temporary" ? "temporary" : "persistent";
     const session: RoomSession = {
       roomId,
+      roomType,
       username:
         typeof requestedUsername === "string" && requestedUsername.trim()
           ? requestedUsername.trim().slice(0, 64)
@@ -142,6 +151,7 @@ export class SignalingRoom extends DurableObject {
     this.send(ws, {
       type: "joined",
       roomId,
+      roomType,
       peerCount: this.countRoomSessions(roomId, ws),
     });
     this.broadcastToRoom(
@@ -175,7 +185,8 @@ export class SignalingRoom extends DurableObject {
       ) {
         return undefined;
       }
-      return { roomId: session.roomId, username: session.username };
+      return { roomId: session.roomId, username: session.username,
+        roomType: session.roomType === "temporary" ? "temporary" : "persistent" };
     } catch {
       return undefined;
     }

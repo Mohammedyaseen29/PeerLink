@@ -1,4 +1,4 @@
-import { X } from "lucide-react";
+import { LoaderCircle, X } from "lucide-react";
 import type { FileMetadata } from "../ProgressDB";
 import { formatBytes } from "../utils/helpers";
 
@@ -63,8 +63,9 @@ export function FilePreviewModal({
                         </>
                     ) : (
                         <div className="preview-loading">
-                            <div className="loading-spinner" />
-                            <p>Loading preview...</p>
+                            <div className="preview-loading-icon"><LoaderCircle size={22} /></div>
+                            <strong>Preparing preview</strong>
+                            <p>Reading the stored file on this device...</p>
                         </div>
                     )}
                 </div>

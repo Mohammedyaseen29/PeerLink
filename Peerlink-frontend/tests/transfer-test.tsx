@@ -1,7 +1,7 @@
 import { StrictMode, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import { useP2P } from '../src/hooks/useP2P';
-import { openDB, deleteFile, type FileMetadata } from '../src/ProgressDB';
+import { openDB, deleteFile, getChunkIndices, getFilesInRoom, releasePreviewUrl, type FileMetadata } from '../src/ProgressDB';
 
 type Peer = ReturnType<typeof useP2P>;
 const peers: Peer[] = [];
@@ -54,6 +54,55 @@ function Tests() {
         setRunning(true); setLog('Connecting two real application hooks through local WebSockets...');
         const room = `test-${crypto.randomUUID()}`;
         try {
+            if (new URLSearchParams(location.search).has('rooms')) {
+                peers[0].join(room, 'persistent');
+                await until(() => peers[0].signalingStatus === 'waiting', 'persistent creator joined');
+                peers[1].join(room);
+                await until(() => peers.every(peer => peer.connected), 'persistent peers connected');
+                await peers[0].addFilesToQueue([source(70001, 'saved-room.bin')]);
+                await until(() => peers[1].receivedFiles.some(file => file.name === 'saved-room.bin'), 'persistent receive');
+                await until(() => peers[0].sendQueue.at(-1)?.status === 'sent', 'persistent send committed');
+                const saved = peers[1].receivedFiles.find(file => file.name === 'saved-room.bin')!;
+                await verify(saved);
+                peers[0].leaveRoom(); peers[1].leaveRoom();
+                await until(() => peers.every(peer => !peer.inRoom && !peer.connected && peer.receivedFiles.length === 0), 'persistent peers left');
+                peers[1].join(room);
+                await until(() => peers[1].receivedFiles.some(file => file.fileId === saved.fileId), 'persistent room reopen');
+                if (peers[1].connected) throw new Error('Persistent revisit unexpectedly needs a peer');
+                const previewUrl = await peers[1].openPreview(saved);
+                const previewBytes = new Uint8Array(await (await fetch(previewUrl)).arrayBuffer());
+                await releasePreviewUrl(previewUrl);
+                if (previewBytes.length !== saved.size || previewBytes.some((byte, index) => byte !== pattern[index % pattern.length])) {
+                    throw new Error('Stored preview content mismatch');
+                }
+                append('PASS: persistent room reopens offline with intact local preview');
+                await deleteFile(saved.fileId);
+                if ((await getFilesInRoom(room)).some(file => file.fileId === saved.fileId) ||
+                    (await getChunkIndices(saved.fileId)).length) throw new Error('Deleted file or chunks remained in room');
+                append('PASS: deleted room file and chunks removed');
+                peers[1].leaveRoom();
+
+                const temporaryRoom = `test-${crypto.randomUUID()}`;
+                peers[0].join(temporaryRoom, 'temporary');
+                await until(() => peers[0].signalingStatus === 'waiting', 'temporary creator joined');
+                peers[1].join(temporaryRoom);
+                await until(() => peers.every(peer => peer.connected), 'temporary peers connected');
+                if (peers[1].roomType !== 'temporary') throw new Error('Temporary room type did not reach joiner');
+                await peers[0].addFilesToQueue([source(70001, 'temporary-room.bin')]);
+                await until(() => peers[1].receivedFiles.some(file => file.name === 'temporary-room.bin'), 'temporary receive');
+                await until(() => peers[0].sendQueue.at(-1)?.status === 'sent', 'temporary send committed');
+                if (peers[1].receivedFiles[0].roomType !== 'temporary') throw new Error('Temporary metadata not marked');
+                peers[1].leaveRoom(); peers[0].leaveRoom();
+                for (let attempt = 0; attempt < 40; attempt++) {
+                    if (!(await getFilesInRoom(temporaryRoom)).some(file => file.roomType === 'temporary')) break;
+                    await delay(25);
+                }
+                if ((await getFilesInRoom(temporaryRoom)).some(file => file.roomType === 'temporary')) throw new Error('Temporary file survived leave');
+                append('PASS: both peers use temporary room type and received files are removed on leave');
+                setMounted(false);
+                append('ROOM LIFECYCLE TESTS PASSED');
+                return;
+            }
             peers[0].join(room);
             await until(() => peers[0].inRoom, 'first room join');
             peers[1].join(room);

@@ -1200,7 +1200,23 @@ body {
     align-items: center;
     gap: var(--spacing-md);
     color: var(--fg-secondary);
+    padding: var(--spacing-2xl) var(--spacing-lg);
+    text-align: center;
 }
+
+.preview-loading strong { color: var(--fg); font-size: 0.85rem; font-weight: 600; }
+.preview-loading p { font-size: 0.75rem; }
+.preview-loading-icon {
+    display: grid;
+    place-items: center;
+    width: 48px;
+    height: 48px;
+    border: 1px solid rgba(147, 197, 253, 0.25);
+    border-radius: var(--radius-lg);
+    background: rgba(147, 197, 253, 0.08);
+    color: var(--info);
+}
+.preview-loading-icon svg { animation: spin 1.3s linear infinite; }
 
 .loading-spinner {
     width: 32px;
@@ -2259,6 +2275,122 @@ body {
     font-size: 0.875rem;
     font-weight: 500;
     color: var(--fg);
+}
+
+.room-card-footer {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--spacing-sm);
+    flex-wrap: wrap;
+}
+
+.room-leave-btn,
+.room-status-retry {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0.45rem;
+    padding: 0.55rem 0.8rem;
+    border: 1px solid var(--border-hover);
+    border-radius: var(--radius-md);
+    background: var(--bg-secondary);
+    color: var(--fg-secondary);
+    font: inherit;
+    font-size: 0.75rem;
+    cursor: pointer;
+    transition: background var(--transition-fast), color var(--transition-fast);
+}
+
+.room-leave-btn:hover,
+.room-status-retry:hover {
+    background: var(--bg-elevated);
+    color: var(--fg);
+}
+
+.room-leave-btn:focus-visible,
+.room-status-retry:focus-visible,
+.toast-dismiss:focus-visible {
+    outline: 2px solid var(--info);
+    outline-offset: 2px;
+}
+
+.room-status {
+    display: flex;
+    align-items: center;
+    gap: var(--spacing-md);
+    padding: var(--spacing-md) var(--spacing-lg);
+    border: 1px solid var(--border-hover);
+    border-radius: var(--radius-lg);
+    background: linear-gradient(110deg, var(--bg-card), var(--bg-secondary));
+    animation: bannerSlideIn 0.25s ease-out;
+}
+
+.room-status-icon {
+    display: grid;
+    place-items: center;
+    width: 42px;
+    height: 42px;
+    flex: 0 0 42px;
+    border: 1px solid rgba(147, 197, 253, 0.25);
+    border-radius: var(--radius-md);
+    background: rgba(147, 197, 253, 0.08);
+    color: var(--info);
+}
+
+.room-status-offline .room-status-icon {
+    border-color: rgba(252, 165, 165, 0.25);
+    background: rgba(252, 165, 165, 0.08);
+    color: var(--danger);
+}
+
+.room-status-spinner { animation: spin 1.3s linear infinite; }
+
+.room-status-copy { display: flex; flex: 1; flex-direction: column; min-width: 0; }
+.room-status-copy strong { color: var(--fg); font-size: 0.82rem; font-weight: 600; }
+.room-status-copy span { color: var(--fg-secondary); font-size: 0.72rem; line-height: 1.5; }
+
+.toast-overlay {
+    justify-content: flex-end;
+    padding: var(--spacing-lg);
+}
+
+.toast-body {
+    width: min(420px, 100%);
+    min-height: 56px;
+    border-left: 0;
+    border-radius: var(--radius-lg);
+    padding: 0.75rem 0.85rem;
+    box-shadow: 0 16px 44px rgba(0, 0, 0, 0.48);
+    animation: toastSlideDown 0.24s ease-out;
+}
+
+.toast-success { border-color: rgba(110, 231, 183, 0.3); }
+.toast-error { border-color: rgba(252, 165, 165, 0.3); }
+.toast-info { border-color: rgba(147, 197, 253, 0.3); }
+.toast-success .toast-icon { color: var(--success); }
+.toast-error .toast-icon { color: var(--danger); }
+.toast-info .toast-icon { color: var(--info); }
+.toast-icon { display: inline-flex; flex: 0 0 auto; }
+.toast-message-text { flex: 1; line-height: 1.4; }
+.toast-dismiss {
+    display: inline-grid;
+    place-items: center;
+    width: 28px;
+    height: 28px;
+    flex: 0 0 28px;
+    border: 0;
+    border-radius: var(--radius-sm);
+    background: transparent;
+    color: var(--fg-secondary);
+    cursor: pointer;
+}
+.toast-dismiss:hover { background: var(--bg-elevated); color: var(--fg); }
+
+@media (max-width: 480px) {
+    .room-status { align-items: flex-start; flex-wrap: wrap; padding: var(--spacing-md); }
+    .room-status-retry { margin-left: 58px; }
+    .toast-overlay { padding: var(--spacing-md); }
 }
 
 @keyframes toastSlideDown {

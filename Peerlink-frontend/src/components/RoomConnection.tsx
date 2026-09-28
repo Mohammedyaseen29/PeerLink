@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { LogIn, Hash, Clock, Database, Zap, Users, UserPlus, Copy, Check } from "lucide-react";
+import { LogIn, Hash, Clock, Database, Zap, Users, UserPlus, Copy, Check, LogOut } from "lucide-react";
 import { ConnectionIndicator } from "./ConnectionIndicator";
 import { Avatar } from "./Avatar";
 import type { ConnectionType, RoomType } from "../types";
@@ -10,9 +10,11 @@ interface RoomConnectionProps {
     roomId: string;
     onRoomIdChange: (roomId: string) => void;
     onJoin: (roomId: string, roomType: RoomType) => void;
+    onLeave: () => void;
     connected: boolean;
     inRoom: boolean;
     connectionType: ConnectionType;
+    signalingStatus: "idle" | "connecting" | "waiting" | "negotiating" | "offline";
     roomType: RoomType;
     generateRoomId: () => string;
     avatar: string;
@@ -22,9 +24,11 @@ export function RoomConnection({
     roomId,
     onRoomIdChange,
     onJoin,
+    onLeave,
     connected,
     inRoom,
     connectionType,
+    signalingStatus,
     roomType,
     generateRoomId,
     avatar,
@@ -92,10 +96,6 @@ export function RoomConnection({
         setSelectedRoomType("persistent");
     };
 
-    if ((connected || inRoom) && isWaiting) {
-        setIsWaiting(false);
-    }
-
     if (connected || inRoom) {
         return (
             <div className="room-connection">
@@ -118,17 +118,20 @@ export function RoomConnection({
                             </div>
                         </div>
                         
-                        {roomType === "temporary" && (
-                            <div className="room-type-badge temporary">
-                                <Clock size={12} />
-                                <span>Temporary</span>
-                            </div>
-                        )}
+                        <div className={`room-type-badge ${roomType}`}>
+                            {roomType === "temporary" ? <Clock size={12} /> : <Database size={12} />}
+                            <span>{roomType === "temporary" ? "Temporary" : "Persistent"}</span>
+                        </div>
                     </div>
 
                     {copyError && <p className="room-copy-error" role="status">Could not copy the room ID. Please select and copy it manually.</p>}
 
-                    <ConnectionIndicator connected={connected} connectionType={connectionType} />
+                    <div className="room-card-footer">
+                        <ConnectionIndicator connected={connected} connectionType={connectionType} status={signalingStatus} />
+                        <button type="button" className="room-leave-btn" onClick={onLeave}>
+                            <LogOut size={15} /><span>Leave room</span>
+                        </button>
+                    </div>
                 </div>
             </div>
         );
@@ -198,7 +201,7 @@ export function RoomConnection({
                             <p className="room-type-hint">
                                 {selectedRoomType === "persistent" 
                                     ? "Locally stored file copies remain on this device"
-                                    : "Data deleted when both peers leave"}
+                                    : "Received files are removed from this device when you leave"}
                             </p>
                         </div>
 

@@ -17,6 +17,7 @@ interface ReceivedFilesProps {
     onlineFiles: FileMetadata[];
     onDownload: (file: FileMetadata) => void;
     onPreview: (file: FileMetadata) => void;
+    onDelete: (file: FileMetadata) => void;
     onClearRoom: () => void;
 }
 
@@ -35,6 +36,7 @@ export function ReceivedFiles({
     onlineFiles,
     onDownload,
     onPreview,
+    onDelete,
     onClearRoom,
 }: ReceivedFilesProps) {
     const renderFiles = (entries: FileMetadata[], online: boolean) => (
@@ -62,6 +64,11 @@ export function ReceivedFiles({
                                     <Eye size={16} /><span>Preview</span>
                                 </button>
                             )}
+                            {!online && (
+                                <button onClick={() => onDelete(file)} className="btn-icon btn-danger-text" aria-label={`Delete ${file.name}`} title="Delete stored file">
+                                    <Trash2 size={16} />
+                                </button>
+                            )}
                         </div>
                     </div>
                 );
@@ -83,7 +90,7 @@ export function ReceivedFiles({
 
             <section className="local-received-files">
                 <div className="section-header">
-                    <h3 className="section-title">Received Files</h3>
+                    <h3 className="section-title">Stored on this device</h3>
                     {files.length > 0 && (
                         <button onClick={onClearRoom} className="btn-icon btn-danger-text">
                             <Trash2 size={16} />
