@@ -76,6 +76,30 @@ function Tests() {
                     throw new Error('Stored preview content mismatch');
                 }
                 append('PASS: persistent room reopens offline with intact local preview');
+                const originalPicker = Object.getOwnPropertyDescriptor(window, 'showSaveFilePicker');
+                const downloadedChunks: Uint8Array[] = [];
+                let downloadClosed = false;
+                Object.defineProperty(window, 'showSaveFilePicker', {
+                    configurable: true,
+                    value: async () => ({ createWritable: async () => ({
+                        write: async (data: ArrayBuffer) => { downloadedChunks.push(new Uint8Array(data.slice(0))); },
+                        close: async () => { downloadClosed = true; },
+                        abort: async () => undefined,
+                    }) }),
+                });
+                try { await peers[1].downloadFile(saved); }
+                finally {
+                    if (originalPicker) Object.defineProperty(window, 'showSaveFilePicker', originalPicker);
+                    else Reflect.deleteProperty(window, 'showSaveFilePicker');
+                }
+                const downloadedBytes = new Uint8Array(saved.size);
+                let downloadedLength = 0;
+                for (const chunk of downloadedChunks) { downloadedBytes.set(chunk, downloadedLength); downloadedLength += chunk.byteLength; }
+                if (!downloadClosed || downloadedLength !== saved.size ||
+                    downloadedBytes.some((byte, index) => byte !== pattern[index % pattern.length])) {
+                    throw new Error('Stored download content mismatch');
+                }
+                append('PASS: stored download stream matches the original bytes');
                 await deleteFile(saved.fileId);
                 if ((await getFilesInRoom(room)).some(file => file.fileId === saved.fileId) ||
                     (await getChunkIndices(saved.fileId)).length) throw new Error('Deleted file or chunks remained in room');

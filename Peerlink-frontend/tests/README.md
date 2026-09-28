@@ -8,7 +8,7 @@ The frontend signaling environment must point to `ws://localhost:8787`.
 
 - `/transfer-test.html`: click **Run integration tests**. Uses two actual React hooks, WebSocket signaling, real reliable WebRTC channels, file-reader workers, SHA-256, and IndexedDB. Default large file: 128 MiB plus 123 bytes.
 - `/transfer-test.html?quick`: same checks with an 8 MiB large file.
-- `/transfer-test.html?rooms`: checks persistent room reopen and preview without a peer, deletion, temporary type synchronization, and cleanup on leave.
+- `/transfer-test.html?rooms`: checks persistent room reopen, preview and download bytes without a peer, deletion, temporary type synchronization, and cleanup on leave.
 - `/tests/faults.html`: click **Run fault tests**. Injects corrupt hashes, invalid sequence numbers, and a buffer-full send failure through simulated channels, using the real transfer engine and worker.
 - `/tests/transport.html`: click **Compare packet sizes**. Measures raw local WebRTC without hashing, disk persistence, or application state.
 
