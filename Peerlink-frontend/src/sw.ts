@@ -46,8 +46,10 @@ class BrokerFailure extends Error {
 
 const sw = globalThis as unknown as PeerLinkServiceWorker
 
-sw.addEventListener('install', (event) => {
-  event.waitUntil(sw.skipWaiting())
+sw.addEventListener('message', (event) => {
+  if (event.data && typeof event.data === 'object' && event.data.type === 'SKIP_WAITING') {
+    event.waitUntil(sw.skipWaiting())
+  }
 })
 
 sw.addEventListener('activate', (event) => {

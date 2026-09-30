@@ -2349,6 +2349,12 @@ body {
 .room-status-copy { display: flex; flex: 1; flex-direction: column; min-width: 0; }
 .room-status-copy strong { color: var(--fg); font-size: 0.82rem; font-weight: 600; }
 .room-status-copy span { color: var(--fg-secondary); font-size: 0.72rem; line-height: 1.5; }
+.app-update-banner .room-status-retry:disabled { opacity: 0.55; cursor: not-allowed; }
+.app-update-banner .toast-dismiss { margin-left: -0.35rem; }
+@media (max-width: 480px) {
+    .app-update-banner .room-status-retry { white-space: nowrap; }
+    .app-update-banner .toast-dismiss { margin-left: auto; }
+}
 
 .toast-overlay {
     justify-content: flex-end;

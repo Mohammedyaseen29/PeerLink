@@ -112,16 +112,13 @@ export class SignalingRoom extends DurableObject {
     }
   }
 
-  webSocketClose(ws: WebSocket) {
-    const session = this.getSession(ws);
-    if (!session) return;
+  webSocketClose(ws: WebSocket, code: number, reason: string) {
+    const responseCode = code === 1005 || code === 1006 || code === 1015 ? 1000 : code;
+    this.detachSocket(ws, responseCode, reason || "Closing handshake complete");
+  }
 
-    this.clearSession(ws);
-    if ("protocolVersion" in session) {
-      this.broadcastToRoom(session.roomId, { type: "peer_left", roomId: session.roomId, peerId: session.peerId }, ws);
-    } else {
-      this.broadcastToLegacyRoom(session.roomId, { type: "peer_left", roomId: session.roomId }, ws);
-    }
+  webSocketError(ws: WebSocket, _error: unknown) {
+    this.detachSocket(ws, 1011, "WebSocket error");
   }
 
   private joinV2(ws: WebSocket, requestedRoomId: unknown, requestedUsername: unknown, requestedAvatar: unknown, requestedRoomType: unknown) {
@@ -169,7 +166,7 @@ export class SignalingRoom extends DurableObject {
     };
     ws.serializeAttachment(session);
 
-    this.send(ws, {
+    if (!this.send(ws, {
       type: "joined",
       protocolVersion: PROTOCOL_VERSION,
       peerId: session.peerId,
@@ -177,7 +174,7 @@ export class SignalingRoom extends DurableObject {
       roomType,
       maxPeers: MAX_ROOM_SESSIONS,
       peers: existingPeers,
-    });
+    }, false)) return;
     this.broadcastToRoom(roomId, { type: "peer_joined", roomId, peer: this.publicPeer(session) }, ws);
   }
 
@@ -204,6 +201,11 @@ export class SignalingRoom extends DurableObject {
       return;
     }
     if (this.countRoomSessions(roomId) > 0) {
+      this.broadcastToRoom(roomId, {
+        type: "protocol_conflict",
+        roomId,
+        code: "incompatible_protocol",
+      }, ws);
       this.rejectProtocol(ws);
       return;
     }
@@ -228,12 +230,12 @@ export class SignalingRoom extends DurableObject {
     };
     ws.serializeAttachment(session);
 
-    this.send(ws, {
+    if (!this.send(ws, {
       type: "joined",
       roomId,
       roomType: session.roomType,
       peerCount: this.countLegacyRoomSessions(roomId, ws),
-    });
+    }, false)) return;
     this.broadcastToLegacyRoom(roomId, { type: "peer_joined", roomId, username: session.username }, ws);
   }
 
@@ -242,7 +244,7 @@ export class SignalingRoom extends DurableObject {
       type: "error",
       code: "incompatible_protocol",
       expectedProtocolVersion: PROTOCOL_VERSION,
-      message: "This room uses a different PeerLink version. Update the app or use a new room ID.",
+      message: "This room uses a different PeerLink version. Everyone must update or reload the app, leave the room, and rejoin.",
     });
     if (ws.readyState === 1) ws.close(4003, "Incompatible protocol");
   }
@@ -298,6 +300,30 @@ export class SignalingRoom extends DurableObject {
       ws.serializeAttachment(null);
     } catch {
       // The socket may already be closing.
+    }
+  }
+
+  private detachSocket(ws: WebSocket, code: number, reason: string, announce = true) {
+    const session = this.getSession(ws);
+    this.clearSession(ws);
+    this.closeSocket(ws, code, reason);
+    if (!session || !announce) return;
+    this.broadcastSessionLeft(session, ws);
+  }
+
+  private broadcastSessionLeft(session: AnyRoomSession, exceptWs: WebSocket) {
+    if ("protocolVersion" in session) {
+      this.broadcastToRoom(session.roomId, { type: "peer_left", roomId: session.roomId, peerId: session.peerId }, exceptWs);
+    } else {
+      this.broadcastToLegacyRoom(session.roomId, { type: "peer_left", roomId: session.roomId }, exceptWs);
+    }
+  }
+
+  private closeSocket(ws: WebSocket, code: number, reason: string) {
+    try {
+      ws.close(code, reason);
+    } catch {
+      // The socket may already be closed.
     }
   }
 
@@ -367,26 +393,47 @@ export class SignalingRoom extends DurableObject {
     return count;
   }
 
-  private send(ws: WebSocket, data: Record<string, unknown>) {
-    if (ws.readyState === 1) ws.send(JSON.stringify(data));
-  }
-
-  private broadcastToRoom(roomId: string, data: Record<string, unknown>, exceptWs: WebSocket) {
-    const message = JSON.stringify(data);
-    for (const client of this.ctx.getWebSockets()) {
-      const session = this.getSession(client);
-      if (client !== exceptWs && client.readyState === 1 && session && "protocolVersion" in session && session.roomId === roomId) {
-        client.send(message);
-      }
+  private send(ws: WebSocket, data: Record<string, unknown>, announceFailure = true) {
+    if (ws.readyState !== 1) {
+      if (this.getSession(ws)) this.detachSocket(ws, 1011, "Signaling socket is not open", announceFailure);
+      return false;
+    }
+    try {
+      ws.send(JSON.stringify(data));
+      return true;
+    } catch {
+      this.detachSocket(ws, 1011, "Signaling delivery failed", announceFailure);
+      return false;
     }
   }
 
+  private broadcastToRoom(roomId: string, data: Record<string, unknown>, exceptWs: WebSocket) {
+    this.broadcastSafely(roomId, data, exceptWs, false);
+  }
+
   private broadcastToLegacyRoom(roomId: string, data: Record<string, unknown>, exceptWs: WebSocket) {
-    const message = JSON.stringify(data);
-    for (const client of this.ctx.getWebSockets()) {
-      const session = this.getSession(client);
-      if (client !== exceptWs && client.readyState === 1 && session && !("protocolVersion" in session) && session.roomId === roomId) {
-        client.send(message);
+    this.broadcastSafely(roomId, data, exceptWs, true);
+  }
+
+  private broadcastSafely(roomId: string, data: Record<string, unknown>, exceptWs: WebSocket, legacy: boolean) {
+    const pending = [{ data, exceptWs, legacy }];
+    while (pending.length > 0) {
+      const current = pending.shift()!;
+      const message = JSON.stringify(current.data);
+      for (const client of this.ctx.getWebSockets()) {
+        if (client === current.exceptWs || client.readyState !== 1) continue;
+        const session = this.getSession(client);
+        if (!session || session.roomId !== roomId || ("protocolVersion" in session) === current.legacy) continue;
+        try {
+          client.send(message);
+        } catch {
+          this.clearSession(client);
+          this.closeSocket(client, 1011, "Signaling delivery failed");
+          const leftMessage = "protocolVersion" in session
+            ? { type: "peer_left", roomId, peerId: session.peerId }
+            : { type: "peer_left", roomId };
+          pending.push({ data: leftMessage, exceptWs: client, legacy: !("protocolVersion" in session) });
+        }
       }
     }
   }

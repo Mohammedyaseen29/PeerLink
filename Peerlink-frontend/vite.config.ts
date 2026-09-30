@@ -11,8 +11,8 @@ export default defineConfig({
       strategies: 'injectManifest',
       srcDir: 'src',
       filename: 'sw.ts',
-      injectRegister: 'auto',
-      registerType: 'autoUpdate',
+      injectRegister: null,
+      registerType: 'prompt',
       devOptions: {
         enabled: true,
         type: 'module'

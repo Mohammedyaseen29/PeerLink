@@ -5,6 +5,25 @@ import { openDB, deleteFile, getChunkIndices, getFilesInRoom, releasePreviewUrl,
 
 type Peer = ReturnType<typeof useP2P>;
 const peers: Peer[] = [];
+const signalingSockets: Array<{ socket: WebSocket; peerId?: string }> = [];
+const nativeWebSocketSend = WebSocket.prototype.send;
+WebSocket.prototype.send = function (data: string | ArrayBufferLike | Blob | ArrayBufferView) {
+    if (typeof data === 'string') {
+        try {
+            if (JSON.parse(data).type === 'join' && !signalingSockets.some(entry => entry.socket === this)) {
+                const entry: { socket: WebSocket; peerId?: string } = { socket: this };
+                this.addEventListener('message', event => {
+                    try {
+                        const message = JSON.parse(String(event.data));
+                        if (message.type === 'joined' && typeof message.peerId === 'string') entry.peerId = message.peerId;
+                    } catch { /* The application handles malformed signaling frames. */ }
+                });
+                signalingSockets.push(entry);
+            }
+        } catch { /* Non-JSON data channels are not signaling joins. */ }
+    }
+    return nativeWebSocketSend.call(this, data);
+};
 function PeerPanel({ index }: { index: number }) {
     const peer = useP2P(); peers[index] = peer;
     return <p>Peer {index}: {peer.connected ? peer.connectionType : 'connecting'} | Sent {peer.sendQueue.filter(f => f.status === 'sent').length} | Received {peer.receivedFiles.length} | Progress {peer.sendQueue.at(-1)?.bytesTransferred ?? peer.currentReceiving?.bytesReceived ?? 0} | Metrics {JSON.stringify(peer.transferMetrics)} | {peer.toast?.message}</p>;
@@ -50,11 +69,48 @@ function Tests() {
     const [log, setLog] = useState('Ready');
     const [running, setRunning] = useState(false);
     const [mounted, setMounted] = useState(true);
+    const groupMode = new URLSearchParams(location.search).has('group');
+    const failureMode = new URLSearchParams(location.search).has('group-failure');
     const append = (line: string) => setLog(previous => previous + '\n' + line);
     async function run() {
-        setRunning(true); setLog('Connecting two real application hooks through local WebSockets...');
+        setRunning(true); setLog(groupMode || failureMode ? 'Connecting three real application hooks through local WebSockets...' : 'Connecting two real application hooks through local WebSockets...');
+        signalingSockets.length = 0;
         const room = `test-${crypto.randomUUID()}`;
         try {
+            if (failureMode) {
+                for (const peer of peers) peer.join(room, 'persistent');
+                await until(() => peers.every(peer => peer.inRoom && peer.members.length === 2), 'three room members joined');
+                await until(() => peers.every(peer => peer.members.length === 2 && peer.members.every(member => member.status === 'connected')), 'three-peer mesh connected');
+                await until(() => signalingSockets.some(entry => entry.peerId === peers[2].selfPeerId), 'third signaling socket identified');
+                if (peers.some(peer => peer.members.length !== 2)) throw new Error('A room member is missing from the mesh');
+                append('PASS: three users joined the same room and formed a mesh');
+
+                // Simulate one malformed offer from the third member to the first. The
+                // other peer link must stay usable when this negotiation fails.
+                const thirdSocket = signalingSockets.find(entry => entry.peerId === peers[2].selfPeerId)!.socket;
+                thirdSocket.send(JSON.stringify({ type: 'offer', roomId: room, targetPeerId: peers[0].selfPeerId,
+                    payload: { type: 'offer', sdp: 'not-an-sdp' } }));
+                await until(() => peers[0].toast?.message.includes('Unable to negotiate') ?? false, 'third-peer negotiation error surfaced', 10_000);
+                const firstStillHasSecond = () => peers[0].members.some(member =>
+                    member.peerId === peers[1].selfPeerId && member.status === 'connected');
+                const secondStillHasFirst = () => peers[1].members.some(member =>
+                    member.peerId === peers[0].selfPeerId && member.status === 'connected');
+                if (!firstStillHasSecond() || !secondStillHasFirst() || !peers[0].inRoom || !peers[1].inRoom) {
+                    throw new Error('A malformed third-peer offer disrupted the existing peer link');
+                }
+                append('PASS: malformed third-peer offer left the first peer link connected');
+
+                peers[0].setSelectedPeerIds([peers[1].selfPeerId]);
+                await peers[0].addFilesToQueue([source(70001, 'third-peer-regression.bin')]);
+                await until(() => peers[1].receivedFiles.some(file => file.name === 'third-peer-regression.bin'), 'transfer after malformed offer');
+                await until(() => peers[0].sendQueue.at(-1)?.status === 'sent', 'transfer after malformed offer committed');
+                await verify(peers[1].receivedFiles.find(file => file.name === 'third-peer-regression.bin')!);
+                append('PASS: existing peer transferred exact bytes after third-peer negotiation failure');
+                for (const peer of peers) for (const meta of peer.receivedFiles) await deleteFile(meta.fileId);
+                peers.forEach(peer => peer.leaveRoom());
+                append('ALL THREE-PEER TESTS PASSED');
+                return;
+            }
             if (new URLSearchParams(location.search).has('rooms')) {
                 peers[0].join(room, 'persistent');
                 await until(() => peers[0].signalingStatus === 'waiting', 'persistent creator joined');
@@ -251,8 +307,7 @@ function Tests() {
         } catch (error) { append('FAIL: ' + String(error)); }
         finally { setRunning(false); }
     }
-    const groupMode = new URLSearchParams(location.search).has('group');
     return <main><h1>PeerLink integration tests</h1><button disabled={running || !mounted} onClick={() => void run()}>Run integration tests</button>
-        {mounted && Array.from({ length: groupMode ? 3 : 2 }, (_, index) => <PeerPanel key={index} index={index} />)}<pre style={{ whiteSpace: 'pre-wrap' }}>{log}</pre></main>;
+        {mounted && Array.from({ length: groupMode || failureMode ? 3 : 2 }, (_, index) => <PeerPanel key={index} index={index} />)}<pre style={{ whiteSpace: 'pre-wrap' }}>{log}</pre></main>;
 }
 createRoot(document.getElementById('root')!).render(<StrictMode><Tests /></StrictMode>);

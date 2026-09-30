@@ -16,6 +16,9 @@ import { releasePreviewUrl, type FileMetadata } from "./ProgressDB";
 import { CircleAlert, CircleCheck, Info, LoaderCircle, RefreshCw, WifiOff, X } from "lucide-react";
 
 function App() {
+  const [appUpdateReady, setAppUpdateReady] = useState(false);
+  const serviceWorkerRegistration = useRef<ServiceWorkerRegistration | null>(null);
+  const reloadAfterControlChange = useRef(false);
   const {
     roomId,
     roomType,
@@ -61,6 +64,57 @@ function App() {
     dismissToast,
     notifyError,
   } = useP2P();
+  const inRoomRef = useRef(inRoom);
+  inRoomRef.current = inRoom;
+
+  useEffect(() => {
+    if (!('serviceWorker' in navigator)) return;
+    let disposed = false;
+    let hadController = Boolean(navigator.serviceWorker.controller);
+    let registration: ServiceWorkerRegistration | null = null;
+    let installingWorker: ServiceWorker | null = null;
+    const onWorkerStateChange = () => {
+      if (installingWorker?.state === 'installed' && navigator.serviceWorker.controller) setAppUpdateReady(true);
+    };
+    const onUpdateFound = () => {
+      installingWorker?.removeEventListener('statechange', onWorkerStateChange);
+      installingWorker = registration?.installing ?? null;
+      installingWorker?.addEventListener('statechange', onWorkerStateChange);
+      onWorkerStateChange();
+    };
+    const onWindowFocus = () => { void registration?.update().catch(() => undefined); };
+    const onControllerChange = () => {
+      if (disposed) return;
+      if (reloadAfterControlChange.current) {
+        reloadAfterControlChange.current = false;
+        if (!inRoomRef.current) window.location.reload();
+        else setAppUpdateReady(true);
+      } else if (hadController) {
+        setAppUpdateReady(true);
+      }
+      hadController = true;
+    };
+    navigator.serviceWorker.addEventListener('controllerchange', onControllerChange);
+    window.addEventListener('focus', onWindowFocus);
+    const workerPath = import.meta.env.DEV ? '/dev-sw.js?dev-sw' : '/sw.js';
+    const workerType: WorkerType = import.meta.env.DEV ? 'module' : 'classic';
+    void navigator.serviceWorker.register(workerPath, { scope: '/', type: workerType }).then(value => {
+      if (disposed) return;
+      registration = value;
+      serviceWorkerRegistration.current = value;
+      value.addEventListener('updatefound', onUpdateFound);
+      if (value.installing) onUpdateFound();
+      if (value.waiting) setAppUpdateReady(true);
+      void value.update().catch(() => undefined);
+    }).catch(() => undefined);
+    return () => {
+      disposed = true;
+      navigator.serviceWorker.removeEventListener('controllerchange', onControllerChange);
+      window.removeEventListener('focus', onWindowFocus);
+      registration?.removeEventListener('updatefound', onUpdateFound);
+      installingWorker?.removeEventListener('statechange', onWorkerStateChange);
+    };
+  }, []);
 
   const [previewFile, setPreviewFile] = useState<FileMetadata | null>(null);
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
@@ -123,6 +177,29 @@ function App() {
           username={username}
           avatar={settings.avatar}
         />
+
+        {appUpdateReady && (
+          <div className="room-status app-update-banner" role="status" aria-live="polite">
+            <div className="room-status-icon"><RefreshCw size={20} /></div>
+            <div className="room-status-copy">
+              <strong>PeerLink update ready</strong>
+              <span>{inRoom ? "Leave the room after transfers finish to install the update." : "Install the latest version to keep room members on the same app version."}</span>
+            </div>
+            <button type="button" className="room-status-retry" disabled={inRoom} onClick={() => {
+              if (inRoom) return;
+              const waitingWorker = serviceWorkerRegistration.current?.waiting;
+              if (waitingWorker) {
+                reloadAfterControlChange.current = true;
+                waitingWorker.postMessage({ type: 'SKIP_WAITING' });
+              } else {
+                window.location.reload();
+              }
+            }}>
+              {inRoom ? 'Leave room to update' : 'Update now'}
+            </button>
+            <button type="button" className="toast-dismiss" onClick={() => setAppUpdateReady(false)} aria-label="Dismiss update notice"><X size={16} /></button>
+          </div>
+        )}
 
         <RoomConnection
           key={connectionFormKey}

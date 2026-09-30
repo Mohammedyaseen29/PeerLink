@@ -773,31 +773,45 @@ export function useP2P() {
             socket.send(JSON.stringify(message));
         };
         const beginOffer = async (session: PeerSession) => {
-            if (!session.pc || offering.has(session.peerId) || selfPeerIdRef.current.localeCompare(session.peerId) >= 0) return;
+            const peer = session.pc;
+            if (!peer || sessions.current.get(session.peerId) !== session || offering.has(session.peerId) || selfPeerIdRef.current.localeCompare(session.peerId) >= 0) return;
             offering.add(session.peerId);
-            await session.pc.setLocalDescription(await session.pc.createOffer());
-            send({ type: 'offer', roomId: room, targetPeerId: session.peerId, payload: session.pc.localDescription });
+            const offer = await peer.createOffer();
+            if (sessions.current.get(session.peerId) !== session) return;
+            await peer.setLocalDescription(offer);
+            if (sessions.current.get(session.peerId) !== session) return;
+            send({ type: 'offer', roomId: room, targetPeerId: session.peerId, payload: peer.localDescription });
         };
         const ensureSignaledSession = (peer: { peerId: string; username?: string; avatar?: string }) => {
             if (typeof peer.peerId !== 'string' || !peer.peerId) return null;
             const session = createPeerSession({ peerId: peer.peerId, username: typeof peer.username === 'string' ? peer.username : 'Peer', avatar: peer.avatar });
-            void beginOffer(session).catch(error => showToast(`Unable to connect to ${session.username}: ${String(error)}`));
+            void beginOffer(session).catch(error => {
+                if (socket !== ws.current || sessions.current.get(session.peerId) !== session) return;
+                offering.delete(session.peerId);
+                showToast(`Unable to connect to ${session.username}: ${String(error)}. Other room connections are still active.`);
+                session.dispose?.();
+            });
             return session;
         };
         socket.onopen = () => {
             void (async () => {
                 try {
                     // Complete temporary-room cleanup before announcing membership to peers.
-                    if (newRoomType === 'temporary') { await clearTemporaryFiles(room); replaceReceivedFiles([]); }
+                    if (newRoomType === 'temporary') await clearTemporaryFiles(room);
                     else if (newRoomType === 'persistent') void navigator.storage?.persist?.().catch(() => undefined);
+                    if (!live.current || socket !== ws.current || currentRoom.current !== room) return;
+                    if (newRoomType === 'temporary') replaceReceivedFiles([]);
                     send({ type: 'join', protocolVersion: 2, roomId: room, roomType: newRoomType, username, avatar: options.current.avatar });
                 } catch (error) { failSignaling(error instanceof Error ? error.message : String(error)); }
             })();
         };
         socket.onerror = () => failSignaling('Unable to reach the signaling server.');
-        socket.onclose = () => {
+        socket.onclose = event => {
             if (socket !== ws.current) return;
-            if (joinedRoom) showToast('The signaling connection closed.');
+            if (event.code === 4001) showToast('This room is full. Rooms support up to 4 people.');
+            else if (event.code === 4002) showToast('That room ID is invalid.');
+            else if (event.code === 4003) showToast('This room has older PeerLink clients. Everyone must update or reload the app, leave the room, and rejoin.');
+            else if (joinedRoom) showToast('The signaling connection closed.');
             else showToast('The signaling connection ended before joining.');
             setConnectionFormKey(value => value + 1); closeAll(); ws.current = null;
             if (live.current) { setHasPeer(false); setSignalingStatus('offline'); }
@@ -808,21 +822,48 @@ export function useP2P() {
             }
         };
         socket.onmessage = ({ data: text }) => {
+            let msg: Record<string, unknown>;
+            try {
+                const parsed: unknown = JSON.parse(text);
+                if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return;
+                msg = parsed as Record<string, unknown>;
+            } catch {
+                return;
+            }
+            if (msg.type === 'error' || msg.type === 'room_full') {
+                const maxPeers = typeof msg.maxPeers === 'number' && Number.isSafeInteger(msg.maxPeers) && msg.maxPeers > 0 ? msg.maxPeers : 4;
+                const code = typeof msg.code === 'string' ? msg.code : '';
+                const messages: Record<string, string> = {
+                    already_joined: 'This connection has already joined a room.',
+                    invalid_room_id: 'That room ID is invalid.',
+                    room_full: `This room is full. Rooms support up to ${maxPeers} people.`,
+                    incompatible_protocol: 'This room has older PeerLink clients. Everyone must update or reload the app, leave the room, and rejoin.',
+                };
+                failSignaling(messages[code] || (msg.type === 'room_full'
+                    ? `This room is full. Rooms support up to ${maxPeers} people.`
+                    : 'The signaling server rejected the room connection.'));
+                return;
+            }
             signaling = signaling.then(async () => {
                 if (!live.current || socket !== ws.current) return;
-                const msg = JSON.parse(text);
-                if (msg.type === 'error' || msg.type === 'room_full') {
-                    const messages: Record<string, string> = { already_joined: 'This connection has already joined a room.',
-                        invalid_room_id: 'That room ID is invalid.', room_full: 'This room is full.' };
-                    failSignaling(messages[msg.code] || 'The signaling server rejected the room connection.'); return;
+                if (msg.type === 'protocol_conflict') {
+                    showToast('A peer is using an older PeerLink version. Everyone must update or reload the app, leave the room, and rejoin.', 'info');
+                    return;
                 }
                 if (msg.type === 'joined') {
                     if (msg.protocolVersion !== 2 || typeof msg.peerId !== 'string' || !Array.isArray(msg.peers)) { failSignaling('The signaling server returned an incompatible room response.'); return; }
                     joinedRoom = true; selfPeerIdRef.current = msg.peerId; setSelfPeerId(msg.peerId);
                     const confirmedType: RoomType = msg.roomType === 'temporary' ? 'temporary' : 'persistent';
                     temporary.current = confirmedType === 'temporary'; setRoomType(confirmedType); setInRoom(true);
-                    if (confirmedType === 'temporary') { await clearTemporaryFiles(room); replaceReceivedFiles([]); }
-                    else { const files = await getFilesInRoom(room); if (currentRoom.current === room) replaceReceivedFiles(files.filter(file => file.roomType !== 'temporary')); }
+                    if (confirmedType === 'temporary') {
+                        await clearTemporaryFiles(room);
+                        if (!live.current || socket !== ws.current || currentRoom.current !== room) return;
+                        replaceReceivedFiles([]);
+                    } else {
+                        const files = await getFilesInRoom(room);
+                        if (!live.current || socket !== ws.current || currentRoom.current !== room) return;
+                        replaceReceivedFiles(files.filter(file => file.roomType !== 'temporary'));
+                    }
                     const peers = msg.peers.filter((peer: unknown) => !!peer && typeof peer === 'object' && typeof (peer as { peerId?: unknown }).peerId === 'string') as Array<{ peerId: string; username?: string; avatar?: string }>;
                     for (const peer of peers) ensureSignaledSession(peer);
                     setSelectedPeerIds(peers.map(peer => peer.peerId));
@@ -830,7 +871,12 @@ export function useP2P() {
                     return;
                 }
                 if (msg.type === 'peer_joined' && msg.peer) {
-                    const session = ensureSignaledSession(msg.peer);
+                    if (typeof msg.peer !== 'object' || Array.isArray(msg.peer)) return;
+                    const peer = msg.peer as { peerId?: unknown; username?: unknown; avatar?: unknown };
+                    if (typeof peer.peerId !== 'string') return;
+                    const session = ensureSignaledSession({ peerId: peer.peerId,
+                        username: typeof peer.username === 'string' ? peer.username : undefined,
+                        avatar: typeof peer.avatar === 'string' ? peer.avatar : undefined });
                     if (session) {
                         setSelectedPeerIds(current => current.includes(session.peerId) ? current : [...current, session.peerId]);
                         setHasPeer(true); setSignalingStatus('negotiating'); showToast(`${session.username} joined the room`, 'success');
@@ -845,15 +891,30 @@ export function useP2P() {
                     let session = sessions.current.get(msg.fromPeerId);
                     if (!session && msg.type === 'offer') session = createPeerSession({ peerId: msg.fromPeerId, username: 'Peer' });
                     const peer = session?.pc; if (!session || !peer) return;
-                    if (msg.type === 'ice_candidate') {
-                        if (peer.remoteDescription) await peer.addIceCandidate(msg.payload); else session.candidates.push(msg.payload);
-                    } else {
-                        await peer.setRemoteDescription(msg.payload);
-                        for (const candidate of session.candidates.splice(0)) await peer.addIceCandidate(candidate);
-                        if (msg.type === 'offer') {
-                            await peer.setLocalDescription(await peer.createAnswer());
-                            send({ type: 'answer', roomId: room, targetPeerId: session.peerId, payload: peer.localDescription });
+                    try {
+                        if (msg.type === 'ice_candidate') {
+                            if (peer.remoteDescription) {
+                                await peer.addIceCandidate(msg.payload as RTCIceCandidateInit);
+                                if (socket !== ws.current || sessions.current.get(session.peerId) !== session) return;
+                            } else session.candidates.push(msg.payload as RTCIceCandidateInit);
+                        } else {
+                            await peer.setRemoteDescription(msg.payload as RTCSessionDescriptionInit);
+                            if (socket !== ws.current || sessions.current.get(session.peerId) !== session) return;
+                            for (const candidate of session.candidates.splice(0)) {
+                                await peer.addIceCandidate(candidate);
+                                if (socket !== ws.current || sessions.current.get(session.peerId) !== session) return;
+                            }
+                            if (msg.type === 'offer') {
+                                await peer.setLocalDescription(await peer.createAnswer());
+                                if (socket !== ws.current || sessions.current.get(session.peerId) !== session) return;
+                                send({ type: 'answer', roomId: room, targetPeerId: session.peerId, payload: peer.localDescription });
+                            }
                         }
+                    } catch (error) {
+                        if (socket !== ws.current || !live.current || sessions.current.get(session.peerId) !== session) return;
+                        offering.delete(session.peerId);
+                        showToast(`Unable to negotiate with ${session.username}: ${String(error)}. Other room connections are still active.`);
+                        session.dispose?.();
                     }
                 }
             }).catch(error => failSignaling(error instanceof Error ? error.message : String(error)));
