@@ -8,6 +8,7 @@ interface ChatPanelProps {
     isOpen: boolean;
     onClose: () => void;
     messages: ChatMessage[];
+    selfPeerId: string;
     username: string;
     avatar: string;
     onSendMessage: (content: string) => void;
@@ -17,6 +18,7 @@ export function ChatPanel({
     isOpen,
     onClose,
     messages,
+    selfPeerId,
     username,
     avatar: userAvatar,
     onSendMessage,
@@ -69,7 +71,7 @@ export function ChatPanel({
                     </div>
                 ) : (
                     messages.map((msg) => {
-                        const isOwn = msg.senderId === username;
+                        const isOwn = msg.senderId === selfPeerId;
                         return (
                             <div
                                 key={msg.id}
@@ -105,7 +107,7 @@ export function ChatPanel({
                 <div ref={messagesEndRef} />
             </div>
 
-            <form onSubmit={handleSubmit} className="chat-panel-input">
+            <form onSubmit={handleSubmit} className="chat-panel-input" aria-label={`Chat as ${username}`}>
                 <Avatar avatarId={userAvatar} size="xs" />
                 <input
                     type="text"

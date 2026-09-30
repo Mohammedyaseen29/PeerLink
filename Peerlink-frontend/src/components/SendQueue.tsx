@@ -87,6 +87,7 @@ export function SendQueue({
                                                 ? "Sent"
                                                 : file.status === "failed" ? "Failed" : "Pending"}
                                 </span>
+                                {file.recipients?.length > 0 && <span className="recipient-count">{file.recipients.filter((recipient) => recipient.status === "sent").length}/{file.recipients.length} received</span>}
                             </div>
 
                             <div className="file-actions">
@@ -118,6 +119,20 @@ export function SendQueue({
                                     </button>
                                 )}
                             </div>
+                            {file.recipients?.length > 0 && (
+                                <div className="queue-recipient-list" aria-label={`Delivery status for ${file.file.name}`}>
+                                    {file.recipients.map((recipient) => (
+                                        <div className="queue-recipient" key={recipient.peerId}>
+                                            <div className="queue-recipient-topline">
+                                                <span>{recipient.peerName}</span>
+                                                <span className={`recipient-status status-${recipient.status}`}>{recipient.status === "sent" ? "Received" : recipient.status === "sending" ? `${recipient.progress}%` : recipient.status === "failed" ? "Retry needed" : recipient.status === "paused" ? "Paused" : "Waiting"}</span>
+                                            </div>
+                                            <div className="recipient-progress-track"><span style={{ width: `${Math.max(0, Math.min(100, recipient.progress))}%` }} /></div>
+                                            <span className="recipient-bytes">{formatBytes(recipient.bytesTransferred)} of {formatBytes(file.file.size)}</span>
+                                        </div>
+                                    ))}
+                                </div>
+                            )}
                         </div>
                     );
                 })}

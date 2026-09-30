@@ -20,12 +20,13 @@ async function until(predicate: () => boolean, description: string, timeout = 30
 }
 const pattern = new Uint8Array(1024 * 1024);
 for (let i = 0; i < pattern.length; i++) pattern[i] = (i * 31 + (i >>> 8)) & 255;
-function source(size: number, name: string) {
+function source(size: number, name: string, seed = 0) {
     const parts: BlobPart[] = [];
-    for (let remaining = size; remaining > 0; remaining -= pattern.length) parts.push(pattern.subarray(0, Math.min(remaining, pattern.length)));
+    const content = seed === 0 ? pattern : pattern.map((byte) => (byte + seed) & 255);
+    for (let remaining = size; remaining > 0; remaining -= content.length) parts.push(content.subarray(0, Math.min(remaining, content.length)));
     return new File(parts, name, { type: 'application/octet-stream' });
 }
-async function verify(meta: FileMetadata) {
+async function verify(meta: FileMetadata, seed = 0) {
     const db = await openDB();
     let offset = 0, index = 0;
     await new Promise<void>((resolve, reject) => {
@@ -37,7 +38,7 @@ async function verify(meta: FileMetadata) {
             if (cursor.value.chunkIndex !== index++) { reject(new Error('Stored chunk gap')); return; }
             const bytes = new Uint8Array(cursor.value.data);
             for (const byte of bytes) {
-                if (byte !== pattern[offset++ % pattern.length]) { reject(new Error('Stored byte mismatch')); return; }
+                if (byte !== ((pattern[offset++ % pattern.length] + seed) & 255)) { reject(new Error('Stored byte mismatch')); return; }
             }
             cursor.continue();
         };
@@ -127,6 +128,61 @@ function Tests() {
                 append('ROOM LIFECYCLE TESTS PASSED');
                 return;
             }
+            if (new URLSearchParams(location.search).has('group')) {
+                append('Joining a three-member room and checking direct recipient routes...');
+                peers[0].join(room, 'persistent');
+                await until(() => peers[0].inRoom, 'group creator joined');
+                peers[1].join(room);
+                peers[2].join(room);
+                await until(() => peers.slice(0, 3).every(peer => peer.connected && peer.members.length === 2), 'three-member mesh');
+                const recipientId = peers[1].selfPeerId;
+                peers[0].setSelectedPeerIds([recipientId]);
+                peers[2].setSelectedPeerIds([recipientId]);
+                await until(() => peers[0].selectedPeerIds[0] === recipientId && peers[2].selectedPeerIds[0] === recipientId, 'target selections applied');
+                await Promise.all([
+                    peers[0].addFilesToQueue([source(96 * 1024 + 13, 'from-peer-a.bin', 17)]),
+                    peers[2].addFilesToQueue([source(80 * 1024 + 7, 'from-peer-c.bin', 83)]),
+                ]);
+                await until(() =>
+                    peers[1].receivedFiles.some(file => file.name === 'from-peer-a.bin') &&
+                    peers[1].receivedFiles.some(file => file.name === 'from-peer-c.bin') &&
+                    peers[0].sendQueue.some(file => file.file.name === 'from-peer-a.bin' && file.status === 'sent') &&
+                    peers[2].sendQueue.some(file => file.file.name === 'from-peer-c.bin' && file.status === 'sent'),
+                'two concurrent targeted sends');
+                const fromA = peers[1].receivedFiles.find(file => file.name === 'from-peer-a.bin')!;
+                const fromC = peers[1].receivedFiles.find(file => file.name === 'from-peer-c.bin')!;
+                await verify(fromA, 17);
+                await verify(fromC, 83);
+                if (fromA.fileId === fromC.fileId || fromA.sourcePeerId !== peers[0].selfPeerId || fromC.sourcePeerId !== peers[2].selfPeerId) {
+                    throw new Error('Incoming copies were not kept distinct by source');
+                }
+                const sentA = peers[0].sendQueue.find(file => file.file.name === 'from-peer-a.bin')!;
+                const sentC = peers[2].sendQueue.find(file => file.file.name === 'from-peer-c.bin')!;
+                if (sentA.recipientIds.join() !== recipientId || sentC.recipientIds.join() !== recipientId ||
+                    peers[2].onlineFiles.some(file => file.name === 'from-peer-a.bin') ||
+                    peers[0].onlineFiles.some(file => file.name === 'from-peer-c.bin')) {
+                    throw new Error('A file catalog reached an unselected room member');
+                }
+                peers[0].sendChatMessage('group sender identity');
+                await until(() => peers[1].chatMessages.some(message => message.content === 'group sender identity'), 'group chat');
+                if (peers[1].chatMessages.find(message => message.content === 'group sender identity')?.senderId !== peers[0].selfPeerId) {
+                    throw new Error('Group chat sender identity did not match the sending peer');
+                }
+                append('PASS: two simultaneous, byte-verified targeted copies; unselected catalog stayed private; chat identity is peer-based');
+                peers[2].leaveRoom();
+                await until(() => !peers[2].inRoom && peers[0].connected && peers[1].connected, 'third member leaves while pair remains');
+                peers[0].setSelectedPeerIds([recipientId]);
+                await peers[0].addFilesToQueue([source(32 * 1024 + 1, 'after-member-left.bin', 41)]);
+                await until(() => peers[1].receivedFiles.some(file => file.name === 'after-member-left.bin'), 'remaining pair transfer');
+                await verify(peers[1].receivedFiles.find(file => file.name === 'after-member-left.bin')!, 41);
+                peers[2].join(room);
+                await until(() => peers.slice(0, 3).every(peer => peer.connected && peer.members.length === 2), 'third member rejoins');
+                append('PASS: remaining pair transferred while one member was gone; that member rejoined successfully');
+                for (const peer of peers.slice(0, 3)) peer.leaveRoom();
+                setMounted(false);
+                append('THREE-PEER GROUP TESTS PASSED');
+                return;
+            }
             peers[0].join(room);
             await until(() => peers[0].inRoom, 'first room join');
             peers[1].join(room);
@@ -195,7 +251,8 @@ function Tests() {
         } catch (error) { append('FAIL: ' + String(error)); }
         finally { setRunning(false); }
     }
+    const groupMode = new URLSearchParams(location.search).has('group');
     return <main><h1>PeerLink integration tests</h1><button disabled={running || !mounted} onClick={() => void run()}>Run integration tests</button>
-        {mounted && <><PeerPanel index={0} /><PeerPanel index={1} /></>}<pre style={{ whiteSpace: 'pre-wrap' }}>{log}</pre></main>;
+        {mounted && Array.from({ length: groupMode ? 3 : 2 }, (_, index) => <PeerPanel key={index} index={index} />)}<pre style={{ whiteSpace: 'pre-wrap' }}>{log}</pre></main>;
 }
 createRoot(document.getElementById('root')!).render(<StrictMode><Tests /></StrictMode>);

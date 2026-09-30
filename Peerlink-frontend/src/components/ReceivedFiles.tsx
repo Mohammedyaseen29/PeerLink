@@ -50,6 +50,7 @@ export function ReceivedFiles({
                         <div className="file-icon"><Icon size={24} /></div>
                         <div className="file-info">
                             <span className="file-name">{file.name}</span>
+                            {file.sourceName && <span className="file-source">{online ? "Shared by" : "Received from"} {file.sourceName}</span>}
                             {file.path && <span className="file-path">{file.path}</span>}
                             <span className="file-size">{formatBytes(file.size)}</span>
                         </div>

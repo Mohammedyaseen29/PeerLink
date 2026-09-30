@@ -21,6 +21,12 @@ export type FileMetadata = {
   receivedChunks: number;
   status: "receiving" | "complete" | "paused";
   createdAt: number;
+  /** Whether this received copy may be re-advertised to room peers. */
+  sharedWithRoom?: boolean;
+  sourcePeerId?: string;
+  sourceName?: string;
+  /** Present only on transient remote catalog entries. */
+  remoteFileId?: string;
 };
 
 let databasePromise: Promise<IDBDatabase> | null = null;

@@ -10,4 +10,5 @@ export { FilePreviewModal } from "./FilePreviewModal";
 export { ChatPanel, ChatToggleButton } from "./ChatPanel";
 export { SettingsModal } from "./SettingsModal";
 export { Avatar } from "./Avatar";
+export { GroupMembers } from "./GroupMembers";
 export { AVATARS, getAvatarById, getRandomAvatar } from "./avatars";

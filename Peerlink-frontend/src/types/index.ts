@@ -10,12 +10,31 @@ declare module "react" {
 export type QueuedFile = {
     file: File;
     id: string;
+  recipientIds: string[];
+  recipients: RecipientTransfer[];
     status: "pending" | "sending" | "sent" | "failed" | "paused";
     progress: number;
     lastSentChunk: number;
     startTime?: number;
     bytesTransferred?: number;
     totalChunks: number;
+};
+
+export type PeerMember = {
+  peerId: string;
+  username: string;
+  avatar?: string;
+  connectionType: ConnectionType;
+  status: "connecting" | "connected" | "disconnected";
+};
+
+export type RecipientTransfer = {
+  peerId: string;
+  peerName: string;
+  status: "pending" | "sending" | "sent" | "failed" | "paused";
+  progress: number;
+  bytesTransferred: number;
+  startTime?: number;
 };
 
 export type ConnectionType = "disconnected" | "local" | "p2p" | "relay";
@@ -28,6 +47,9 @@ export type TransferStats = {
 };
 
 export type ReceivingFile = {
+  fileId: string;
+  peerId: string;
+  peerName: string;
     name: string;
     progress: number;
     size: number;
@@ -44,6 +66,7 @@ export type ChatMessage = {
     content: string;
     timestamp: number;
     status: "sent" | "delivered" | "read";
+  recipientStatuses?: Array<{ peerId: string; peerName: string; status: "sent" | "delivered" }>;
 };
 
 export type Settings = {

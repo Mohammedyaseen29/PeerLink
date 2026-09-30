@@ -7,6 +7,7 @@ import {
   SendQueue,
   ReceiveProgress,
   ReceivedFiles,
+  GroupMembers,
   FilePreviewModal,
   ChatPanel,
   SettingsModal,
@@ -25,7 +26,11 @@ function App() {
     receivedFiles,
     onlineFiles,
     connectionFormKey,
-    currentReceiving,
+    currentReceivings,
+    members,
+    selectedPeerIds,
+    setSelectedPeerIds,
+    selfPeerId,
     chatMessages,
     unreadCount,
     settings,
@@ -149,9 +154,17 @@ function App() {
               </div>
             )}
 
+            <GroupMembers
+              members={members}
+              selectedPeerIds={selectedPeerIds}
+              onSelectionChange={setSelectedPeerIds}
+              username={username}
+              avatar={settings.avatar}
+            />
+
             <FileUploader
               onFilesSelect={handleFilesSelect}
-              disabled={!connected}
+              disabled={!connected || selectedPeerIds.length === 0}
             />
 
             <SendQueue
@@ -162,8 +175,8 @@ function App() {
               onClearAll={clearAllQueue}
             />
 
-            {currentReceiving && (
-              <ReceiveProgress receiving={currentReceiving} />
+            {currentReceivings.length > 0 && (
+              <ReceiveProgress receivings={currentReceivings} />
             )}
 
             <ReceivedFiles
@@ -199,6 +212,7 @@ function App() {
           isOpen={isChatOpen}
           onClose={() => setIsChatOpen(false)}
           messages={chatMessages}
+          selfPeerId={selfPeerId}
           username={username}
           avatar={settings.avatar}
           onSendMessage={sendChatMessage}

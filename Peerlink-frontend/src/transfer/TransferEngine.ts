@@ -7,7 +7,7 @@ const WINDOW = 128; // At most 8 MiB sent but not committed, including SCTP queu
 const BATCH = 16;
 const encoder = new TextDecoder();
 type Packet = { chunkIndex: number; data: ArrayBuffer; hash: Uint8Array };
-type Incoming = { meta: FileMetadata; next: number; committed: number; queue: Packet[]; writing: boolean; cancelled: boolean; timer?: number };
+type Incoming = { meta: FileMetadata; wireId: string; next: number; committed: number; queue: Packet[]; writing: boolean; cancelled: boolean; timer?: number };
 type Outgoing = { id: string; file: File; next: number; committed: number; ready: boolean; paused: boolean; done: boolean; error?: Error; progress: (bytes: number) => void; lastUpdate: number };
 export type TransferEvents = {
     receiving: (meta: FileMetadata, bytes: number) => void;
@@ -37,9 +37,11 @@ export class TransferEngine {
     private room: () => string;
     private roomType: () => "persistent" | "temporary";
     private events: TransferEvents;
+    private source: { peerId?: string; peerName?: string };
     constructor(data: RTCDataChannel, control: RTCDataChannel, room: () => string, events: TransferEvents,
-        roomType: () => "persistent" | "temporary" = () => "persistent") {
-        this.data = data; this.control = control; this.room = room; this.events = events; this.roomType = roomType;
+        roomType: () => "persistent" | "temporary" = () => "persistent",
+        source: { peerId?: string; peerName?: string } = {}) {
+        this.data = data; this.control = control; this.room = room; this.events = events; this.roomType = roomType; this.source = source;
         data.binaryType = 'arraybuffer';
         data.bufferedAmountLowThreshold = LOW;
         data.addEventListener('bufferedamountlow', this.wake);
@@ -82,13 +84,15 @@ export class TransferEngine {
         if (msg.type === 'transfer_meta') {
             if (this.incoming && !this.incoming.cancelled && this.incoming.meta.status !== 'complete') throw new Error('Receiver already busy');
             const { fileId, name, size, totalChunks, chunkSize } = msg;
-            if (typeof fileId !== 'string' || fileId.length > 64 || typeof name !== 'string' ||
+            if (typeof fileId !== 'string' || !/^[A-Za-z0-9_-]{1,64}$/.test(fileId) || typeof name !== 'string' ||
                 !Number.isSafeInteger(size) || Number(size) < 0 || chunkSize !== CHUNK_SIZE ||
                 totalChunks !== Math.ceil(Number(size) / CHUNK_SIZE) || msg.version !== 3) throw new Error('Incompatible transfer metadata');
-            const meta: FileMetadata = { fileId, name, size: Number(size), totalChunks: Number(totalChunks), chunkSize: CHUNK_SIZE,
+            const localId = crypto.randomUUID();
+            const meta: FileMetadata = { fileId: localId, sourcePeerId: this.source.peerId, sourceName: this.source.peerName,
+                sharedWithRoom: msg.sharedWithRoom === true, name, size: Number(size), totalChunks: Number(totalChunks), chunkSize: CHUNK_SIZE,
                 roomId: this.room(), roomType: this.roomType(), path: typeof msg.path === 'string' ? msg.path : undefined,
                 mimeType: typeof msg.mimeType === 'string' ? msg.mimeType : '', receivedChunks: 0, status: 'receiving', createdAt: Date.now() };
-            const incoming: Incoming = { meta, next: 0, committed: 0, queue: [], writing: false, cancelled: false };
+            const incoming: Incoming = { meta, wireId: fileId, next: 0, committed: 0, queue: [], writing: false, cancelled: false };
             this.incoming = incoming;
             const storageStarted = performance.now();
             try { await saveMetaData(meta); }
@@ -99,7 +103,7 @@ export class TransferEngine {
             if (!meta.totalChunks) await this.finishIncoming(incoming);
         } else if (msg.type === 'transfer_cancel') {
             const incoming = this.incoming;
-            if (incoming && incoming.meta.fileId === msg.fileId) {
+            if (incoming && incoming.wireId === msg.fileId) {
                 incoming.cancelled = true;
                 clearTimeout(incoming.timer);
                 incoming.queue = [];
@@ -134,7 +138,7 @@ export class TransferEngine {
             const length = view.getUint16(0, true);
             if (length > 64 || 38 + length > packet.byteLength) throw new Error('Invalid packet header');
             const id = encoder.decode(new Uint8Array(packet, 6, length));
-            if (id !== incoming.meta.fileId) return; // Late packets from a cancelled file.
+            if (id !== incoming.wireId) return; // Late packets from a cancelled file.
             const index = view.getUint32(2, true);
             if (index < incoming.next) return;
             const expected = Math.min(CHUNK_SIZE, incoming.meta.size - index * CHUNK_SIZE);
@@ -164,7 +168,7 @@ export class TransferEngine {
             incoming.cancelled = true;
             clearTimeout(incoming.timer);
             incoming.queue = [];
-            if (this.control.readyState === 'open') this.message({ type: 'transfer_error', fileId: incoming.meta.fileId, message });
+            if (this.control.readyState === 'open') this.message({ type: 'transfer_error', fileId: incoming.wireId, message });
         }
         this.events.error(message);
     }
@@ -179,7 +183,7 @@ export class TransferEngine {
         }
         if (incoming.cancelled || this.disposed) return;
         this.events.received({ ...incoming.meta });
-        this.message({ type: 'transfer_complete', fileId: incoming.meta.fileId, committed: incoming.committed });
+        this.message({ type: 'transfer_complete', fileId: incoming.wireId, committed: incoming.committed });
     }
 
     private async flush(incoming: Incoming) {
@@ -214,7 +218,7 @@ export class TransferEngine {
                 this.metrics.receivedBytes += batch.reduce((n, packet) => n + packet.data.byteLength, 0);
                 this.events.receiving(incoming.meta, Math.min(committed * CHUNK_SIZE, incoming.meta.size));
                 if (committed === incoming.meta.totalChunks) await this.finishIncoming(incoming);
-                else this.message({ type: 'transfer_progress', fileId: incoming.meta.fileId, committed });
+                else this.message({ type: 'transfer_progress', fileId: incoming.wireId, committed });
                 // Accumulate another batch instead of committing each newly arriving chunk.
                 if (incoming.queue.length < BATCH && incoming.next < incoming.meta.totalChunks) break;
             }
@@ -264,7 +268,7 @@ export class TransferEngine {
         this.metrics.pendingReads = 0;
     }
 
-    async send(file: File, id: string, progress: (bytes: number) => void, keepWorkerForNext = false) {
+    async send(file: File, id: string, progress: (bytes: number) => void, keepWorkerForNext = false, sharedWithRoom = true) {
         if (this.outgoing || this.disposed) throw new Error('Sender unavailable');
         const out: Outgoing = { id, file, next: 0, committed: 0, ready: false, paused: false, done: false, progress, lastUpdate: 0 };
         this.outgoing = out;
@@ -288,7 +292,7 @@ export class TransferEngine {
                 nextRead = this.read(out, 0, Math.min(BATCH, totalChunks));
                 nextRead.catch(() => undefined);
             }
-            this.message({ type: 'transfer_meta', version: 3, fileId: id, name: file.name, path: file.webkitRelativePath,
+            this.message({ type: 'transfer_meta', version: 3, fileId: id, name: file.name, path: file.webkitRelativePath, sharedWithRoom,
                 mimeType: file.type, size: file.size, totalChunks, chunkSize: CHUNK_SIZE });
             while (!out.ready) {
                 check();
