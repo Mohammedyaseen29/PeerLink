@@ -18,7 +18,9 @@ The frontend signaling environment must point to `ws://localhost:8787`.
 
 Integration checks compare every stored byte with deterministic source data; exercise 120 queued files (including an empty file), pause/resume, cancellation followed by another file, chat, simultaneous bidirectional transfers, bounded queue counters, worker cleanup, and unmount disposal. Tests delete only their synthetic files after successful checks. Failed/interrupted runs may leave their uniquely named test-room files in IndexedDB.
 
-## Measurements
+## Earlier baseline measurements
+
+These measurements predate the larger batches and receive hash/storage pipeline below; they are historical baseline results, not a benchmark of that change.
 
 Measured in the available in-app Chromium browser on this machine, using a local host-candidate connection:
 
@@ -33,9 +35,9 @@ These results do **not** demonstrate 16 MB/s or an improvement over the user's 1
 ## Implementation
 
 - One active outbound file per peer, with a pipelined worker reader; both peers can send simultaneously.
-- Approximately 64 KiB payloads, a 2 MiB DataChannel high-water mark, a low-water event near that mark for prompt refill, and an 8 MiB receiver-credit bound. Reading ahead is limited to one additional approximately 1 MiB batch.
+- Approximately 64 KiB payloads, a 2 MiB DataChannel high-water mark, a low-water event near that mark for prompt refill, and an 8 MiB sender-credit and receiver-uncommitted-data bound. The sender reads an initial 16-chunk batch (about 1 MiB), then batches of up to 32 chunks (about 2 MiB) with one batch prefetched; after startup, the current and prefetched packet batches hold up to about 4 MiB.
 - Reliable ordered SCTP handles retransmission. Application acknowledgments report committed storage, not receipt into a JavaScript queue. No application retry timer resends chunks during pause/resume.
-- Worker slicing, SHA-256, and transferable packet buffers; receiver hash/sequence/size verification before batched IndexedDB commits.
+- Worker slicing, SHA-256, and transferable packet buffers; the receiver verifies hash/sequence/size, commits up to 32 chunks in one IndexedDB transaction, and hashes one following batch during that transaction. Incomplete receive batches coalesce for up to 32 ms.
 - Queue ownership outside React updater callbacks; completion requires receiver confirmation. Errors surface as failed transfers with explicit retry.
 - Direct-to-disk saving where supported. Blob download fallback limited to 512 MiB and previews to 256 MiB to avoid unbounded reassembly. Large automatic downloads may require a manual Save action.
 

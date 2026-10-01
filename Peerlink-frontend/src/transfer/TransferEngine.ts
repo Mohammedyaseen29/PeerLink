@@ -4,10 +4,13 @@ export const CHUNK_SIZE = 64 * 1024 - 128;
 const HIGH = 2 * 1024 * 1024;
 const LOW = HIGH - 2 * CHUNK_SIZE;
 const WINDOW = 128; // At most 8 MiB sent but not committed, including SCTP queues.
-const BATCH = 16;
+const INITIAL_READ_BATCH = 16;
+const READ_BATCH = 32;
+const RECEIVE_BATCH = 32;
 const encoder = new TextDecoder();
 type Packet = { chunkIndex: number; data: ArrayBuffer; hash: Uint8Array };
-type Incoming = { meta: FileMetadata; wireId: string; next: number; committed: number; queue: Packet[]; writing: boolean; cancelled: boolean; timer?: number };
+type PendingBatch = { packets: Packet[]; validation: Promise<void> };
+type Incoming = { meta: FileMetadata; wireId: string; next: number; committed: number; queue: Packet[]; writing: boolean; committing: boolean; cancelled: boolean; flushRequested: boolean; pendingBatch?: PendingBatch; timer?: number };
 type Outgoing = { id: string; file: File; next: number; committed: number; ready: boolean; paused: boolean; done: boolean; error?: Error; progress: (bytes: number) => void; lastUpdate: number };
 export type TransferEvents = {
     receiving: (meta: FileMetadata, bytes: number) => void;
@@ -92,7 +95,7 @@ export class TransferEngine {
                 sharedWithRoom: msg.sharedWithRoom === true, name, size: Number(size), totalChunks: Number(totalChunks), chunkSize: CHUNK_SIZE,
                 roomId: this.room(), roomType: this.roomType(), path: typeof msg.path === 'string' ? msg.path : undefined,
                 mimeType: typeof msg.mimeType === 'string' ? msg.mimeType : '', receivedChunks: 0, status: 'receiving', createdAt: Date.now() };
-            const incoming: Incoming = { meta, wireId: fileId, next: 0, committed: 0, queue: [], writing: false, cancelled: false };
+            const incoming: Incoming = { meta, wireId: fileId, next: 0, committed: 0, queue: [], writing: false, committing: false, cancelled: false, flushRequested: false };
             this.incoming = incoming;
             const storageStarted = performance.now();
             try { await saveMetaData(meta); }
@@ -105,8 +108,11 @@ export class TransferEngine {
             const incoming = this.incoming;
             if (incoming && incoming.wireId === msg.fileId) {
                 incoming.cancelled = true;
+                incoming.committing = false;
                 clearTimeout(incoming.timer);
                 incoming.queue = [];
+                incoming.pendingBatch = undefined;
+                incoming.flushRequested = false;
                 // The active transaction precedes deleteFile in IndexedDB's transaction order.
                 await deleteFile(incoming.meta.fileId);
             }
@@ -152,12 +158,44 @@ export class TransferEngine {
     };
 
     private scheduleFlush(incoming: Incoming) {
-        if (incoming.writing || incoming.cancelled || this.disposed || !incoming.queue.length) return;
-        if (incoming.queue.length >= BATCH || incoming.next === incoming.meta.totalChunks) void this.flush(incoming);
-        else if (!incoming.timer) incoming.timer = window.setTimeout(() => {
+        if (incoming.cancelled || this.disposed || !incoming.queue.length) return;
+        if (incoming.queue.length >= RECEIVE_BATCH || incoming.next === incoming.meta.totalChunks) {
+            clearTimeout(incoming.timer);
             incoming.timer = undefined;
-            void this.flush(incoming);
+            incoming.flushRequested = false;
+            if (incoming.writing) this.prepareNextBatch(incoming);
+            else void this.flush(incoming);
+        } else if (!incoming.timer) incoming.timer = window.setTimeout(() => {
+            incoming.timer = undefined;
+            incoming.flushRequested = true;
+            if (incoming.writing) this.prepareNextBatch(incoming);
+            else void this.flush(incoming);
         }, 32);
+    }
+
+    private validateBatch(batch: Packet[]): Promise<void> {
+        const hashStarted = performance.now();
+        return Promise.all(batch.map(async packet => {
+            const hash = new Uint8Array(await crypto.subtle.digest('SHA-256', packet.data));
+            if (!hash.every((byte, i) => byte === packet.hash[i])) throw new Error('File integrity check failed');
+        })).then(() => undefined).finally(() => { this.metrics.hashMs += performance.now() - hashStarted; });
+    }
+
+    private prepareNextBatch(incoming: Incoming) {
+        if (!incoming.committing || incoming.pendingBatch || incoming.cancelled || this.disposed || this.incoming !== incoming || !incoming.queue.length) return;
+        const full = incoming.queue.length >= RECEIVE_BATCH;
+        const final = incoming.next === incoming.meta.totalChunks;
+        if (!full && !final && !incoming.flushRequested) return;
+
+        clearTimeout(incoming.timer);
+        incoming.timer = undefined;
+        incoming.flushRequested = false;
+        const packets = incoming.queue.splice(0, RECEIVE_BATCH);
+        const validation = this.validateBatch(packets);
+        // A speculative digest can reject while IndexedDB is committing the prior batch.
+        // Mark it handled now; the ordered writer still awaits it before saving.
+        void validation.catch(() => undefined);
+        incoming.pendingBatch = { packets, validation };
     }
 
     private failIncoming(error: Error) {
@@ -166,8 +204,11 @@ export class TransferEngine {
             ? 'Not enough receiver storage. Free space and retry.' : error.message;
         if (incoming && !incoming.cancelled) {
             incoming.cancelled = true;
+            incoming.committing = false;
             clearTimeout(incoming.timer);
             incoming.queue = [];
+            incoming.pendingBatch = undefined;
+            incoming.flushRequested = false;
             if (this.control.readyState === 'open') this.message({ type: 'transfer_error', fileId: incoming.wireId, message });
         }
         this.events.error(message);
@@ -188,27 +229,42 @@ export class TransferEngine {
 
     private async flush(incoming: Incoming) {
         if (incoming.writing || incoming.cancelled || this.disposed) return;
-        clearTimeout(incoming.timer);
-        incoming.timer = undefined;
         incoming.writing = true;
         try {
-            while (incoming.queue.length && !incoming.cancelled && !this.disposed) {
-                const batch = incoming.queue.splice(0, BATCH);
-                const hashStarted = performance.now();
-                try {
-                    await Promise.all(batch.map(async packet => {
-                        const hash = new Uint8Array(await crypto.subtle.digest('SHA-256', packet.data));
-                        if (!hash.every((byte, i) => byte === packet.hash[i])) throw new Error('File integrity check failed');
-                    }));
-                } finally { this.metrics.hashMs += performance.now() - hashStarted; }
+            while ((incoming.pendingBatch || incoming.queue.length) && !incoming.cancelled && !this.disposed) {
+                let batch: Packet[];
+                let validation: Promise<void>;
+                if (incoming.pendingBatch) {
+                    ({ packets: batch, validation } = incoming.pendingBatch);
+                    incoming.pendingBatch = undefined;
+                } else {
+                    const full = incoming.queue.length >= RECEIVE_BATCH;
+                    const final = incoming.next === incoming.meta.totalChunks;
+                    if (!full && !final && !incoming.flushRequested) break;
+                    clearTimeout(incoming.timer);
+                    incoming.timer = undefined;
+                    incoming.flushRequested = false;
+                    batch = incoming.queue.splice(0, RECEIVE_BATCH);
+                    validation = this.validateBatch(batch);
+                }
+                await validation;
                 if (incoming.cancelled || this.disposed) return;
                 const committed = incoming.committed + batch.length;
                 const completesFile = committed === incoming.meta.totalChunks;
                 const storageStarted = performance.now();
-                try { await saveChunks(incoming.meta.fileId, batch, {
+                incoming.committing = true;
+                const storageCommit = saveChunks(incoming.meta.fileId, batch, {
                     ...incoming.meta, receivedChunks: committed, status: completesFile ? 'complete' : 'receiving',
-                }); }
-                finally { this.metrics.storageMs += performance.now() - storageStarted; }
+                });
+                // Start at most one following batch's digest while this transaction commits.
+                // Partial batches still wait for the 32 ms coalescing timer.
+                this.prepareNextBatch(incoming);
+                this.scheduleFlush(incoming);
+                try { await storageCommit; }
+                finally {
+                    incoming.committing = false;
+                    this.metrics.storageMs += performance.now() - storageStarted;
+                }
                 this.metrics.storedBatches++;
                 this.metrics.storedChunks += batch.length;
                 if (incoming.cancelled || this.disposed) return;
@@ -219,11 +275,9 @@ export class TransferEngine {
                 this.events.receiving(incoming.meta, Math.min(committed * CHUNK_SIZE, incoming.meta.size));
                 if (committed === incoming.meta.totalChunks) await this.finishIncoming(incoming);
                 else this.message({ type: 'transfer_progress', fileId: incoming.wireId, committed });
-                // Accumulate another batch instead of committing each newly arriving chunk.
-                if (incoming.queue.length < BATCH && incoming.next < incoming.meta.totalChunks) break;
             }
-        } catch (error) { if (!incoming.cancelled && this.incoming === incoming) this.failIncoming(error as Error); }
-        finally { incoming.writing = false; this.scheduleFlush(incoming); }
+        } catch (error) { if (!incoming.cancelled && !this.disposed && this.incoming === incoming) this.failIncoming(error as Error); }
+        finally { incoming.committing = false; incoming.writing = false; this.scheduleFlush(incoming); }
     }
 
     private getWorker() {
@@ -289,7 +343,7 @@ export class TransferEngine {
             let nextRead: Promise<ArrayBuffer[]> | null = null;
             if (totalChunks) {
                 this.getWorker().postMessage({ type: 'load', file });
-                nextRead = this.read(out, 0, Math.min(BATCH, totalChunks));
+                nextRead = this.read(out, 0, Math.min(INITIAL_READ_BATCH, totalChunks));
                 nextRead.catch(() => undefined);
             }
             this.message({ type: 'transfer_meta', version: 3, fileId: id, name: file.name, path: file.webkitRelativePath, sharedWithRoom,
@@ -307,7 +361,7 @@ export class TransferEngine {
                 try { packets = await nextRead!; }
                 finally { this.metrics.readAwaitMs += performance.now() - readStarted; }
                 const end = out.next + packets.length;
-                nextRead = end < totalChunks ? this.read(out, end, Math.min(BATCH, totalChunks - end)) : null;
+                nextRead = end < totalChunks ? this.read(out, end, Math.min(READ_BATCH, totalChunks - end)) : null;
                 // A speculative read can be cancelled before the pump awaits it.
                 nextRead?.catch(() => undefined);
                 for (const packet of packets) {
@@ -373,7 +427,14 @@ export class TransferEngine {
         if (this.disposed) return;
         this.disposed = true;
         this.metrics.disposed = true;
-        if (this.incoming) { this.incoming.cancelled = true; clearTimeout(this.incoming.timer); this.incoming.queue = []; }
+        if (this.incoming) {
+            this.incoming.cancelled = true;
+            this.incoming.committing = false;
+            clearTimeout(this.incoming.timer);
+            this.incoming.queue = [];
+            this.incoming.pendingBatch = undefined;
+            this.incoming.flushRequested = false;
+        }
         this.clearWorker(); this.wake();
         this.data.removeEventListener('bufferedamountlow', this.wake);
         this.data.removeEventListener('message', this.onData);
