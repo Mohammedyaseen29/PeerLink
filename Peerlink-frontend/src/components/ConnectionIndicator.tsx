@@ -4,7 +4,7 @@ import type { ConnectionType } from "../types";
 interface ConnectionIndicatorProps {
     connected: boolean;
     connectionType: ConnectionType;
-    status?: "idle" | "connecting" | "waiting" | "negotiating" | "offline";
+    status?: "idle" | "connecting" | "waiting" | "negotiating" | "offline" | "full";
 }
 
 const connectionConfig = {
@@ -37,6 +37,12 @@ const connectionConfig = {
         label: "Offline",
         color: "indicator-disconnected",
         description: "Signaling is unavailable; stored files remain accessible",
+    },
+    full: {
+        icon: WifiOff,
+        label: "Room full",
+        color: "indicator-disconnected",
+        description: "Rooms support up to two people",
     },
     local: {
         icon: Wifi,

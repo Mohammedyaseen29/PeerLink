@@ -14,7 +14,7 @@ interface GroupMembersProps {
 }
 
 export function GroupMembers({ members, selectedPeerIds, onSelectionChange, username, avatar, selfOnline = true,
-    onRetryPeer, maxPeers = 4 }: GroupMembersProps) {
+    onRetryPeer, maxPeers = 2 }: GroupMembersProps) {
     const toggle = (member: PeerMember) => {
         const selected = selectedPeerIds.includes(member.peerId);
         if (member.status !== "connected" && !selected) return;
@@ -64,7 +64,7 @@ export function GroupMembers({ members, selectedPeerIds, onSelectionChange, user
                         </div>
                     );
                 })}
-                {members.length === 0 && <p className="member-empty">Share the room ID to invite up to three people.</p>}
+                {members.length === 0 && <p className="member-empty">Share the room ID to invite one other person.</p>}
             </div>
             {members.length > 0 && <p className="group-members-selection">{selectedPeerIds.length} selected for the next files you add</p>}
         </section>

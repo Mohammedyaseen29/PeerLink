@@ -17,7 +17,6 @@ const MAX_PREVIEW_REQUESTS = 8;
 const PREVIEW_REQUEST_TIMEOUT_MS = 22_000;
 const PREVIEW_BUFFER_HIGH_WATER = 512 * 1024;
 const SIGNALING_HEARTBEAT_INTERVAL_MS = 25_000;
-const SIGNALING_HEARTBEAT_TIMEOUT_MS = 180_000;
 const RECONNECT_DELAYS_MS = [1_000, 5_000, 15_000] as const;
 const RECONNECT_NEGOTIATION_TIMEOUT_MS = 25_000;
 const previewFrameEncoder = new TextEncoder();
@@ -206,7 +205,7 @@ export function useP2P() {
     const [currentReceivings, setCurrentReceivings] = useState<ReceivingFile[]>([]);
     const [inRoom, setInRoom] = useState(false);
     const [hasPeer, setHasPeer] = useState(false);
-    const [signalingStatus, setSignalingStatus] = useState<'idle' | 'connecting' | 'waiting' | 'negotiating' | 'offline'>('idle');
+    const [signalingStatus, setSignalingStatus] = useState<'idle' | 'connecting' | 'waiting' | 'negotiating' | 'offline' | 'full'>('idle');
     const [connectionFormKey, setConnectionFormKey] = useState(0);
     const [sendQueue, setSendQueue] = useState<QueuedFile[]>([]);
     const [receivedFiles, setReceivedFiles] = useState<FileMetadata[]>([]);
@@ -244,6 +243,7 @@ export function useP2P() {
     const clearSignalingMonitor = useRef<() => void>(() => undefined);
     const retryPeerRef = useRef<(peerId: string) => void>(() => undefined);
     const currentRoom = useRef('');
+    const roomJoinGeneration = useRef(0);
     const temporary = useRef(false);
     const live = useRef(true);
     const chatOpen = useRef(false);
@@ -768,10 +768,23 @@ export function useP2P() {
     const join = (newRoomId: string, newRoomType: RoomType = 'persistent') => {
         const room = newRoomId.trim();
         if (!room || ws.current) return;
+        const joinGeneration = ++roomJoinGeneration.current;
         currentRoom.current = room; temporary.current = newRoomType === 'temporary';
         setRoomId(room); setRoomType(newRoomType); setInRoom(true); setHasPeer(false); setSignalingStatus('connecting');
         setSelfPeerId(''); selfPeerIdRef.current = ''; setMembers([]); setSelectedPeerIds([]); setCurrentReceivings([]);
-        replaceOnlineFiles([]);
+        replaceOnlineFiles([]); replaceReceivedFiles([]);
+        // Begin the local lookup before the server replies so a full-room rejection
+        // can still show files already saved for this room on this device.
+        const savedRoomFiles = getFilesInRoom(room).then(
+            files => ({ files: files.filter(file => file.roomType !== 'temporary') }),
+            error => ({ error }),
+        );
+        const restoreSavedRoomFiles = async () => {
+            const result = await savedRoomFiles;
+            if (!live.current || roomJoinGeneration.current !== joinGeneration || currentRoom.current !== room) return;
+            if ('files' in result) replaceReceivedFiles(result.files);
+            else showToast(`Unable to load saved room files: ${String(result.error)}`);
+        };
         const socket = new WebSocket(import.meta.env.VITE_SIGNALING_SERVER_URL); ws.current = socket;
         let joinedRoom = false;
         let signaling = Promise.resolve();
@@ -780,8 +793,6 @@ export function useP2P() {
         roomPeers.clear();
         const recovery = new Map<string, { attempts: number; inFlight: boolean; requested: boolean; timer?: number; timeout?: number }>();
         let heartbeatTimer: number | undefined;
-        let lastHeartbeatAckAt = Date.now();
-        let heartbeatGraceUntil = 0;
         const clearRecovery = (peerId: string) => {
             const state = recovery.get(peerId);
             if (state?.timer !== undefined) window.clearTimeout(state.timer);
@@ -814,27 +825,38 @@ export function useP2P() {
                 setInRoom(false);
             }
         };
+        const handleRoomFull = (message: string) => {
+            if (socket !== ws.current) return;
+            showToast(message);
+            setConnectionFormKey(value => value + 1);
+            clearMonitoring();
+            ws.current = null;
+            setMembers([]); roomPeers.clear(); setSelectedPeerIds([]);
+            setSelfPeerId(''); selfPeerIdRef.current = '';
+            closeAll();
+            socket.onclose = null; socket.onmessage = null; socket.onerror = null;
+            try { socket.close(); } catch { /* Socket already closed. */ }
+            if (live.current) {
+                setHasPeer(false); setConnected(false); setConnectionType('disconnected'); setSignalingStatus('full');
+                setInRoom(true);
+            }
+            if (newRoomType === 'persistent') void restoreSavedRoomFiles();
+        };
         const send = (message: object) => {
             if (socket.readyState !== WebSocket.OPEN) throw new Error('The signaling connection is closed.');
             socket.send(JSON.stringify(message));
         };
-        const requestRoomSync = (resuming = false) => {
+        const requestRoomSync = () => {
             if (!joinedRoom || socket !== ws.current || socket.readyState !== WebSocket.OPEN) return;
-            if (resuming) heartbeatGraceUntil = Date.now() + 45_000;
             try { send({ type: 'heartbeat', roomId: room }); send({ type: 'sync', roomId: room }); }
-            catch { /* The heartbeat timeout will mark a half-open socket offline. */ }
+            catch { /* The WebSocket close event owns room membership cleanup. */ }
         };
-        const onWindowFocus = () => requestRoomSync(true);
-        const onVisibilityChange = () => { if (document.visibilityState === 'visible') requestRoomSync(true); };
+        const onWindowFocus = () => requestRoomSync();
+        const onVisibilityChange = () => { if (document.visibilityState === 'visible') requestRoomSync(); };
         const startMonitoring = () => {
             if (heartbeatTimer !== undefined) return;
-            lastHeartbeatAckAt = Date.now();
             heartbeatTimer = window.setInterval(() => {
                 if (!joinedRoom || socket !== ws.current || socket.readyState !== WebSocket.OPEN) return;
-                if (document.visibilityState === 'visible' && Date.now() - lastHeartbeatAckAt >= SIGNALING_HEARTBEAT_TIMEOUT_MS &&
-                    Date.now() >= heartbeatGraceUntil) {
-                    failSignaling('The room connection was lost. Retry to rejoin and refresh the member list.'); return;
-                }
                 requestRoomSync();
             }, SIGNALING_HEARTBEAT_INTERVAL_MS);
             window.addEventListener('focus', onWindowFocus);
@@ -984,7 +1006,7 @@ export function useP2P() {
         socket.onerror = () => failSignaling('Unable to reach the signaling server.');
         socket.onclose = event => {
             if (socket !== ws.current) return;
-            if (event.code === 4001) showToast('This room is full. Rooms support up to 4 people.');
+            if (event.code === 4001) { handleRoomFull('This room is full. Rooms support up to 2 people.'); return; }
             else if (event.code === 4002) showToast('That room ID is invalid.');
             else if (event.code === 4003) showToast('This room has older PeerLink clients. Everyone must update or reload the app, leave the room, and rejoin.');
             else if (event.code === 4004) showToast('The room connection expired. Retry to rejoin and refresh the member list.');
@@ -1010,7 +1032,7 @@ export function useP2P() {
                 return;
             }
             if (msg.type === 'error' || msg.type === 'room_full') {
-                const maxPeers = typeof msg.maxPeers === 'number' && Number.isSafeInteger(msg.maxPeers) && msg.maxPeers > 0 ? msg.maxPeers : 4;
+                const maxPeers = typeof msg.maxPeers === 'number' && Number.isSafeInteger(msg.maxPeers) && msg.maxPeers > 0 ? msg.maxPeers : 2;
                 const code = typeof msg.code === 'string' ? msg.code : '';
                 const messages: Record<string, string> = {
                     already_joined: 'This connection has already joined a room.',
@@ -1018,9 +1040,11 @@ export function useP2P() {
                     room_full: `This room is full. Rooms support up to ${maxPeers} people.`,
                     incompatible_protocol: 'This room has older PeerLink clients. Everyone must update or reload the app, leave the room, and rejoin.',
                 };
-                failSignaling(messages[code] || (msg.type === 'room_full'
+                const message = messages[code] || (msg.type === 'room_full'
                     ? `This room is full. Rooms support up to ${maxPeers} people.`
-                    : 'The signaling server rejected the room connection.'));
+                    : 'The signaling server rejected the room connection.');
+                if (msg.type === 'room_full' || code === 'room_full') handleRoomFull(message);
+                else failSignaling(message);
                 return;
             }
             signaling = signaling.then(async () => {
@@ -1039,9 +1063,8 @@ export function useP2P() {
                         if (!live.current || socket !== ws.current || currentRoom.current !== room) return;
                         replaceReceivedFiles([]);
                     } else {
-                        const files = await getFilesInRoom(room);
+                        await restoreSavedRoomFiles();
                         if (!live.current || socket !== ws.current || currentRoom.current !== room) return;
-                        replaceReceivedFiles(files.filter(file => file.roomType !== 'temporary'));
                     }
                     reconcileRoomPeers(msg.peers, true);
                     const peerIds = msg.peers.map((peer: { peerId?: unknown }) => typeof peer?.peerId === 'string' ? peer.peerId : '').filter(Boolean);
@@ -1050,11 +1073,9 @@ export function useP2P() {
                     startMonitoring();
                     return;
                 }
-                if (msg.type === 'heartbeat_ack') { lastHeartbeatAckAt = Date.now(); heartbeatGraceUntil = 0; return; }
+                if (msg.type === 'heartbeat_ack') return;
                 if (msg.type === 'room_state') {
                     if (msg.roomId !== room || !Array.isArray(msg.peers)) return;
-                    lastHeartbeatAckAt = Date.now();
-                    heartbeatGraceUntil = 0;
                     reconcileRoomPeers(msg.peers, true);
                     return;
                 }
@@ -1232,6 +1253,7 @@ export function useP2P() {
     const leaveRoom = () => {
         const room = currentRoom.current;
         if (!room) return;
+        roomJoinGeneration.current++;
         const wasTemporary = temporary.current;
         const socket = ws.current;
         clearSignalingMonitor.current();

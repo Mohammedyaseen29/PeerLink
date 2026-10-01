@@ -16,9 +16,6 @@ type RoomSession = RoomPeer & {
   protocolVersion: 2;
   roomId: string;
   roomType: "persistent" | "temporary";
-  heartbeat: boolean;
-  supportsReconnect: boolean;
-  lastHeartbeatAt: number;
 };
 
 type LegacyRoomSession = {
@@ -32,10 +29,8 @@ type AnyRoomSession = RoomSession | LegacyRoomSession;
 
 const PROTOCOL_VERSION = 2;
 const MAX_ROOM_ID_LENGTH = 128;
-const MAX_ROOM_SESSIONS = 4;
+const MAX_ROOM_SESSIONS = 2;
 const ROOM_ID_PATTERN = /^[A-Za-z0-9_-]+$/;
-const HEARTBEAT_EXPIRY_MS = 180_000;
-const HEARTBEAT_SWEEP_MS = 30_000;
 
 const app = new Hono<{ Bindings: Bindings }>();
 
@@ -79,7 +74,7 @@ export class SignalingRoom extends DurableObject {
 
     if (type === "join") {
       if (protocolVersion === PROTOCOL_VERSION) {
-        await this.joinV2(ws, roomId, username, avatar, roomType, messageData.heartbeat, messageData.supportsReconnect);
+        await this.joinV2(ws, roomId, username, avatar, roomType, messageData.supportsReconnect);
       } else if (protocolVersion === undefined) {
         this.joinLegacy(ws, roomId, username, roomType);
       } else {
@@ -103,11 +98,9 @@ export class SignalingRoom extends DurableObject {
           this.forwardToPeer(session, type, payload, targetPeerId, linkId);
           break;
         case "heartbeat":
-          if (session.heartbeat) this.refreshHeartbeat(ws, session);
           this.send(ws, { type: "heartbeat_ack", roomId: session.roomId, peerId: session.peerId });
           break;
         case "sync":
-          if (session.heartbeat) this.refreshHeartbeat(ws, session);
           this.send(ws, {
             type: "room_state",
             roomId: session.roomId,
@@ -145,8 +138,7 @@ export class SignalingRoom extends DurableObject {
   }
 
   private async joinV2(ws: WebSocket, requestedRoomId: unknown, requestedUsername: unknown, requestedAvatar: unknown,
-    requestedRoomType: unknown, heartbeat: unknown, supportsReconnect: unknown) {
-    this.pruneExpiredHeartbeats();
+    requestedRoomType: unknown, supportsReconnect: unknown) {
     const roomId = typeof requestedRoomId === "string" ? requestedRoomId.trim() : "";
     const existingSession = this.getSession(ws);
 
@@ -185,9 +177,7 @@ export class SignalingRoom extends DurableObject {
       roomId,
       roomType,
       username: this.cleanUsername(requestedUsername),
-      heartbeat: heartbeat === true,
       supportsReconnect: supportsReconnect === true,
-      lastHeartbeatAt: Date.now(),
       ...(typeof requestedAvatar === "string" && requestedAvatar.trim()
         ? { avatar: requestedAvatar.trim().slice(0, 64) }
         : {}),
@@ -204,7 +194,6 @@ export class SignalingRoom extends DurableObject {
       peers: existingPeers,
     }, false)) return;
     this.broadcastToRoom(roomId, { type: "peer_joined", roomId, peer: this.publicPeer(session) }, ws);
-    if (session.heartbeat) await this.scheduleHeartbeatSweep();
   }
 
   private joinLegacy(ws: WebSocket, requestedRoomId: unknown, requestedUsername: unknown, requestedRoomType: unknown) {
@@ -294,7 +283,6 @@ export class SignalingRoom extends DurableObject {
       roomId: session.roomId,
       roomType: session.roomType,
       maxPeers: MAX_ROOM_SESSIONS,
-      heartbeat: session.heartbeat,
       supportsReconnect: session.supportsReconnect,
       peers: this.getRoomPeers(session.roomId, session.peerId),
     };
@@ -318,37 +306,8 @@ export class SignalingRoom extends DurableObject {
       ...(typeof linkId === "string" ? { linkId } : {}) });
   }
 
-  private refreshHeartbeat(ws: WebSocket, session: RoomSession) {
-    if (!session.heartbeat) return;
-    ws.serializeAttachment({ ...session, lastHeartbeatAt: Date.now() });
-    void this.scheduleHeartbeatSweep();
-  }
-
-  private async scheduleHeartbeatSweep() {
-    const earliestSweep = Date.now() + HEARTBEAT_SWEEP_MS;
-    const existingAlarm = await this.ctx.storage.getAlarm();
-    if (existingAlarm === null || existingAlarm > earliestSweep) {
-      await this.ctx.storage.setAlarm(earliestSweep);
-    }
-  }
-
-  private pruneExpiredHeartbeats(now = Date.now()) {
-    for (const client of this.ctx.getWebSockets()) {
-      const session = this.getSession(client);
-      if (!session || !("protocolVersion" in session) || !session.heartbeat) continue;
-      if (now - session.lastHeartbeatAt >= HEARTBEAT_EXPIRY_MS) {
-        this.detachSocket(client, 4004, "Signaling heartbeat expired");
-      }
-    }
-  }
-
   async alarm() {
-    this.pruneExpiredHeartbeats();
-    const hasHeartbeats = this.ctx.getWebSockets().some((client) => {
-      const session = this.getSession(client);
-      return session && "protocolVersion" in session && session.heartbeat;
-    });
-    if (hasHeartbeats) await this.scheduleHeartbeatSweep();
+    // Consume alarms scheduled by a previous worker without evicting or rescheduling room members.
   }
 
   private leave(ws: WebSocket, session: RoomSession) {
@@ -407,11 +366,7 @@ export class SignalingRoom extends DurableObject {
           roomId: value.roomId!,
           username: value.username,
           roomType,
-          heartbeat: value.heartbeat === true,
           supportsReconnect: value.supportsReconnect === true,
-          lastHeartbeatAt: typeof value.lastHeartbeatAt === "number" && Number.isFinite(value.lastHeartbeatAt)
-            ? value.lastHeartbeatAt
-            : 0,
           ...(typeof value.avatar === "string" ? { avatar: value.avatar } : {}),
         };
       }

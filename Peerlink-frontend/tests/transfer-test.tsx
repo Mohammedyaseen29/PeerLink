@@ -88,6 +88,103 @@ async function verify(meta: FileMetadata, seed = 0) {
         tx.onerror = () => reject(tx.error);
     });
 }
+async function runTwoMemberCapacityTest(room: string, append: (line: string) => void, extended: boolean) {
+    append('Joining a two-member room, rejecting a third join, and retaining the open pair...');
+    peers[0].join(room, 'temporary');
+    await until(() => peers[0].inRoom && peers[0].selfPeerId && peers[0].signalingStatus === 'waiting', 'first signaling member joined');
+    peers[1].join(room);
+    await until(() => peers.slice(0, 2).every(peer => peer.inRoom && peer.members.length === 1 && peer.connected &&
+        peer.members[0]?.status === 'connected'), 'two-member mesh connected');
+    peers[2].join(room);
+    await until(() => peers[2].signalingStatus === 'full' && peers[2].toast?.message.includes('2 people') &&
+        peers[2].members.length === 0, 'third member rejected at room capacity');
+    const connectedSockets = () => signalingSockets.filter(entry => entry.socket.readyState === WebSocket.OPEN);
+    if (connectedSockets().length !== 2 || peers.slice(0, 2).some(peer => peer.members.length !== 1 || !peer.connected)) {
+        throw new Error('Rejecting a third member affected the existing two-member room');
+    }
+    if (!peers[2].inRoom || peers[2].signalingStatus !== 'full') throw new Error('Rejected member did not remain on the durable room-full screen');
+    append('PASS: third join was rejected cleanly; both existing members stayed connected at 2/2');
+
+    if (extended) {
+        await delay(50_500);
+        if (peers[0].members.length !== 1 || peers[1].members.length !== 1 || peers[2].signalingStatus !== 'full') {
+            throw new Error('An idle room changed membership after heartbeat intervals');
+        }
+        window.dispatchEvent(new Event('focus'));
+        document.dispatchEvent(new Event('visibilitychange'));
+        await delay(400);
+        if (peers[0].members.length !== 1 || peers[1].members.length !== 1) throw new Error('Focus/visibility sync lost an active member');
+        append('PASS: room membership remained 2/2 across idle heartbeats and focus sync');
+    }
+
+    const firstId = peers[0].selfPeerId, secondId = peers[1].selfPeerId;
+    const pairIds = [firstId, secondId].sort();
+    const pairForEndpoint = (low: boolean) => {
+        const offer = [...signaledOffers].reverse().find(item => item.sdp && item.peerId === pairIds[0] && item.targetPeerId === pairIds[1]);
+        const ufrag = iceUfrag(offer?.sdp);
+        if (!ufrag) return undefined;
+        const sender = rtcPeers.find(pc => iceUfrag(pc.localDescription?.sdp) === ufrag);
+        const receiver = rtcPeers.find(pc => iceUfrag(pc.remoteDescription?.sdp) === ufrag);
+        if (!sender || !receiver) return undefined;
+        return low ? (offer!.peerId === pairIds[0] ? sender : receiver) : (offer!.peerId === pairIds[1] ? sender : receiver);
+    };
+    const savedBeforeRetry = source(16391, 'two-member-room-file.bin', 29);
+    peers[0].setSelectedPeerIds([secondId]);
+    await peers[0].addFilesToQueue([savedBeforeRetry]);
+    await until(() => peers[1].receivedFiles.some(meta => meta.name === savedBeforeRetry.name), 'pair transfer before RTC fault');
+    const saved = peers[1].receivedFiles.find(meta => meta.name === savedBeforeRetry.name)!;
+    await verify(saved, 29);
+    let firstLinkId: string | undefined;
+    for (const [label, low] of [['lower UUID endpoint', true], ['upper UUID endpoint', false]] as const) {
+        const pc = pairForEndpoint(low);
+        if (!pc) throw new Error(`Unable to map ${label} from signaling SDP`);
+        const linksBefore = reconnectLinks.filter(link => link.peerId === pairIds[0] && link.targetPeerId === pairIds[1]).length;
+        pc.close();
+        await delay(350);
+        if (connectedSockets().length !== 2 || peers[0].members.length !== 1 || peers[1].members.length !== 1) {
+            throw new Error(`RTC failure at ${label} changed the 2/2 room roster`);
+        }
+        await until(() => peers[0].members[0]?.status === 'connected' && peers[1].members[0]?.status === 'connected',
+            `RTC connection recovered after ${label} failure`, 45_000);
+        await until(() => reconnectLinks.filter(link => link.peerId === pairIds[0] && link.targetPeerId === pairIds[1] && link.linkId).length > linksBefore,
+            `new link ID after ${label} failure`, 10_000);
+        if (low && !firstLinkId) firstLinkId = reconnectLinks.find(link => link.peerId === pairIds[0] &&
+            link.targetPeerId === pairIds[1])?.linkId;
+    }
+    const freshLinkId = [...reconnectLinks].reverse().find(link => link.peerId === pairIds[0] && link.targetPeerId === pairIds[1])?.linkId;
+    if (!firstLinkId || !freshLinkId || firstLinkId === freshLinkId) throw new Error('Reconnects did not mint distinct link IDs');
+    const lowSocket = signalingSockets.find(entry => entry.peerId === pairIds[0])!.socket;
+    lowSocket.send(JSON.stringify({ type: 'offer', roomId: room, targetPeerId: pairIds[1], linkId: firstLinkId,
+        payload: { type: 'offer', sdp: 'stale-link-offer' } }));
+    lowSocket.send(JSON.stringify({ type: 'ice_candidate', roomId: room, targetPeerId: pairIds[1], linkId: firstLinkId,
+        payload: { candidate: 'candidate:stale', sdpMid: '0', sdpMLineIndex: 0 } }));
+    await delay(350);
+    if (peers[0].members[0]?.status !== 'connected' || peers[1].members[0]?.status !== 'connected') {
+        throw new Error('A stale offer or ICE candidate disturbed the repaired pair');
+    }
+    if (!(await getFilesInRoom(room)).some(meta => meta.fileId === saved.fileId)) throw new Error('RTC recovery deleted the stored room file');
+    await peers[0].addFilesToQueue([source(9001, 'two-member-after-recovery.bin', 31)]);
+    await until(() => peers[1].receivedFiles.some(meta => meta.name === 'two-member-after-recovery.bin'), 'pair transfer after recovery', 45_000);
+    await verify(peers[1].receivedFiles.find(meta => meta.name === 'two-member-after-recovery.bin')!, 31);
+    append('PASS: each RTC endpoint recovered without losing 2/2 membership; stale signaling was ignored and bytes/storage verified');
+
+    peers[1].leaveRoom();
+    await until(() => !peers[1].inRoom && peers[0].members.length === 0, 'manual leave updates the remaining member roster');
+    peers[2].leaveRoom();
+    await until(() => !peers[2].inRoom, 'rejected member clears local room state');
+    peers[2].join(room);
+    await until(() => peers[0].members.length === 1 && peers[2].members.length === 1 && peers[0].connected && peers[2].connected,
+        'available slot admits a replacement member', 45_000);
+    await peers[2].addFilesToQueue([source(7003, 'replacement-member-transfer.bin', 37)]);
+    await until(() => peers[0].receivedFiles.some(meta => meta.name === 'replacement-member-transfer.bin'), 'replacement member sends exact file');
+    await verify(peers[0].receivedFiles.find(meta => meta.name === 'replacement-member-transfer.bin')!, 37);
+    peers[2].leaveRoom(); await until(() => !peers[2].inRoom, 'replacement member leaves');
+    peers[1].join(room);
+    await until(() => peers[0].members.length === 1 && peers[1].members.length === 1 && peers[0].connected && peers[1].connected,
+        'manually left member rejoins', 45_000);
+    append('PASS: manual leave freed one slot; another member joined and byte-verified transfer; original member rejoined');
+    for (const peer of peers) peer.leaveRoom();
+}
 function Tests() {
     const [log, setLog] = useState('Ready');
     const [running, setRunning] = useState(false);
@@ -103,149 +200,9 @@ function Tests() {
         reconnectLinks.length = 0;
         const room = `test-${crypto.randomUUID()}`;
         try {
-            if (membershipMode) {
-                append('Joining three users and separating WebRTC transport failure from signaling departure...');
-                peers[0].join(room, 'temporary');
-                await until(() => peers[0].inRoom && peers[0].selfPeerId && peers[0].signalingStatus === 'waiting',
-                    'membership test creator joined the signaling room');
-                peers[1].join(room); peers[2].join(room);
-                await until(() => peers.slice(0, 3).every(peer => peer.inRoom && peer.members.length === 2 &&
-                    peer.members.every(member => member.status === 'connected')), 'three-member connected mesh');
-                await until(() => signalingSockets.length === 3 && signalingSockets.every(entry => entry.peerId), 'all signaling sockets identified');
-                if (rtcPeers.length !== 6) throw new Error(`Expected six mesh connections, got ${rtcPeers.length}`);
-                append('Holding all three Chrome clients idle across two 25-second heartbeat intervals...');
-                await delay(50_500);
-                if (peers.slice(0, 3).some(peer => !peer.inRoom || peer.members.length !== 2)) {
-                    throw new Error('An idle member disappeared from a room roster after two heartbeat intervals');
-                }
-                window.dispatchEvent(new Event('focus'));
-                document.dispatchEvent(new Event('visibilitychange'));
-                await delay(500);
-                if (peers.slice(0, 3).some(peer => !peer.inRoom || peer.members.length !== 2)) {
-                    throw new Error('Focus/visibility room resync changed the healthy three-member roster');
-                }
-                peers[2].setSelectedPeerIds([peers[1].selfPeerId]);
-                await peers[2].addFilesToQueue([source(7013, 'third-peer-after-idle.bin', 27)]);
-                await until(() => peers[1].receivedFiles.some(meta => meta.name === 'third-peer-after-idle.bin'), 'third-peer transfer after idle');
-                await verify(peers[1].receivedFiles.find(meta => meta.name === 'third-peer-after-idle.bin')!, 27);
-                append('PASS: all 3/4 rosters survived idle heartbeats and focus resync; third-peer transfer succeeded');
-
-                const firstId = peers[0].selfPeerId, secondId = peers[1].selfPeerId;
-                const targetId = secondId;
-                const pairForFirstTwo = (lower: boolean) => {
-                    const pairIds = [firstId, secondId].sort();
-                    const offer = [...signaledOffers].reverse().find(item => item.sdp && item.peerId === pairIds[0] && item.targetPeerId === pairIds[1]);
-                    const ufrag = iceUfrag(offer?.sdp);
-                    if (!ufrag) return undefined;
-                    const sender = rtcPeers.find(pc => iceUfrag(pc.localDescription?.sdp) === ufrag);
-                    const receiver = rtcPeers.find(pc => iceUfrag(pc.remoteDescription?.sdp) === ufrag);
-                    if (!sender || !receiver) return undefined;
-                    return lower ? (offer!.peerId === pairIds[0] ? sender : receiver) : (offer!.peerId === pairIds[1] ? sender : receiver);
-                };
-                const pairIds = [firstId, secondId].sort();
-                let firstRecoveryLink: string | undefined;
-                const openSockets = () => signalingSockets.filter(entry => entry.socket.readyState === WebSocket.OPEN);
-                const file = source(16391, 'membership-survives-rtc-drop.bin', 29);
-                peers[0].setSelectedPeerIds([targetId]);
-                await peers[0].addFilesToQueue([file]);
-                await until(() => peers[1].receivedFiles.some(meta => meta.name === file.name), 'temporary file before transport drop');
-                const saved = peers[1].receivedFiles.find(meta => meta.name === file.name)!;
-                await verify(saved, 29);
-                for (const [direction, lower] of [['lower UUID endpoint', true], ['upper UUID endpoint', false]] as const) {
-                    const failedPeer = pairForFirstTwo(lower);
-                    if (!failedPeer) throw new Error(`Could not map the ${direction} RTCPeerConnection from its signaling SDP`);
-                    failedPeer.close();
-                    await delay(350);
-                    if (openSockets().length !== 3 || peers.slice(0, 3).some(peer => peer.members.length !== 2)) {
-                        throw new Error(`RTC-only failure at ${direction} changed the authoritative 3/4 roster`);
-                    }
-                    await until(() => peers[0].members.find(member => member.peerId === secondId)?.status === 'connected' &&
-                        peers[1].members.find(member => member.peerId === firstId)?.status === 'connected',
-                        `RTC link healed after ${direction} failure`, 45_000);
-                    await until(() => reconnectLinks.some(link => link.peerId === pairIds[0] &&
-                        link.targetPeerId === pairIds[1] && typeof link.linkId === 'string'),
-                        `fresh authenticated link ID after ${direction} failure`, 10_000);
-                    if (lower && !firstRecoveryLink) firstRecoveryLink = reconnectLinks.find(link =>
-                        link.peerId === pairIds[0] && link.targetPeerId === pairIds[1])?.linkId;
-                    if (peers.slice(0, 3).some(peer => peer.members.length !== 2)) {
-                        throw new Error(`Roster changed while healing ${direction} failure`);
-                    }
-                }
-                const latestRecoveryLink = [...reconnectLinks].reverse().find(link =>
-                    link.peerId === pairIds[0] && link.targetPeerId === pairIds[1])?.linkId;
-                if (!firstRecoveryLink || !latestRecoveryLink || firstRecoveryLink === latestRecoveryLink) {
-                    throw new Error('Expected distinct stale and current reconnect link IDs');
-                }
-                const lowerSocket = signalingSockets.find(entry => entry.peerId === pairIds[0])!.socket;
-                lowerSocket.send(JSON.stringify({ type: 'offer', roomId: room, targetPeerId: pairIds[1],
-                    linkId: firstRecoveryLink, payload: { type: 'offer', sdp: 'stale-link-offer' } }));
-                lowerSocket.send(JSON.stringify({ type: 'ice_candidate', roomId: room, targetPeerId: pairIds[1],
-                    linkId: firstRecoveryLink, payload: { candidate: 'candidate:stale', sdpMid: '0', sdpMLineIndex: 0 } }));
-                await delay(350);
-                if (peers.slice(0, 3).some(peer => peer.members.length !== 2) ||
-                    peers[1].members.find(member => member.peerId === firstId)?.status !== 'connected') {
-                    throw new Error('A stale offer or ICE candidate disturbed the recovered link');
-                }
-                if (!(await getFilesInRoom(room)).some(meta => meta.fileId === saved.fileId)) {
-                    throw new Error('Temporary-room file was deleted during RTC-only recovery');
-                }
-                await peers[0].addFilesToQueue([source(9001, 'membership-after-rtc-recovery.bin', 31)]);
-                await until(() => peers[1].receivedFiles.some(meta => meta.name === 'membership-after-rtc-recovery.bin'),
-                    'transfer after transport recovery', 45_000);
-                await verify(peers[1].receivedFiles.find(meta => meta.name === 'membership-after-rtc-recovery.bin')!, 31);
-                append('PASS: WebRTC-only failure retained 3/4 rosters, preserved room files, and recovered peer transfer');
-
-                const thirdEntry = signalingSockets.find(entry => entry.peerId === peers[2].selfPeerId)!;
-                thirdEntry.socket.close();
-                await until(() => peers[0].members.length === 1 && peers[1].members.length === 1 &&
-                    peers[2].signalingStatus === 'offline' && peers[2].members.length === 0,
-                    'signaling departure removes third member from all rosters', 15_000);
-                if ((await getFilesInRoom(room)).some(meta => meta.roomType === 'temporary')) {
-                    throw new Error('Temporary-room data survived signaling membership departure');
-                }
-                append('PASS: signaling loss removes membership and temporary-room data');
-                peers[2].leaveRoom();
-                await until(() => !peers[2].inRoom, 'third member leaves after signaling loss');
-                peers[2].join(room);
-                await until(() => peers.slice(0, 3).every(peer => peer.inRoom && peer.members.length === 2 &&
-                    peer.members.every(member => member.status === 'connected')), 'third member rejoins with fresh roster', 45_000);
-                append('PASS: rejoin restored a converged three-member roster');
-                peers.forEach(peer => peer.leaveRoom());
-                append('ROOM MEMBERSHIP TESTS PASSED');
-                return;
-            }
-            if (failureMode) {
-                for (const peer of peers) peer.join(room, 'persistent');
-                await until(() => peers.every(peer => peer.inRoom && peer.members.length === 2), 'three room members joined');
-                await until(() => peers.every(peer => peer.members.length === 2 && peer.members.every(member => member.status === 'connected')), 'three-peer mesh connected');
-                await until(() => signalingSockets.some(entry => entry.peerId === peers[2].selfPeerId), 'third signaling socket identified');
-                if (peers.some(peer => peer.members.length !== 2)) throw new Error('A room member is missing from the mesh');
-                append('PASS: three users joined the same room and formed a mesh');
-
-                // Simulate one malformed offer from the third member to the first. The
-                // other peer link must stay usable when this negotiation fails.
-                const thirdSocket = signalingSockets.find(entry => entry.peerId === peers[2].selfPeerId)!.socket;
-                thirdSocket.send(JSON.stringify({ type: 'offer', roomId: room, targetPeerId: peers[0].selfPeerId,
-                    payload: { type: 'offer', sdp: 'not-an-sdp' } }));
-                await until(() => peers[0].toast?.message.includes('Unable to negotiate') ?? false, 'third-peer negotiation error surfaced', 10_000);
-                const firstStillHasSecond = () => peers[0].members.some(member =>
-                    member.peerId === peers[1].selfPeerId && member.status === 'connected');
-                const secondStillHasFirst = () => peers[1].members.some(member =>
-                    member.peerId === peers[0].selfPeerId && member.status === 'connected');
-                if (!firstStillHasSecond() || !secondStillHasFirst() || !peers[0].inRoom || !peers[1].inRoom) {
-                    throw new Error('A malformed third-peer offer disrupted the existing peer link');
-                }
-                append('PASS: malformed third-peer offer left the first peer link connected');
-
-                peers[0].setSelectedPeerIds([peers[1].selfPeerId]);
-                await peers[0].addFilesToQueue([source(70001, 'third-peer-regression.bin')]);
-                await until(() => peers[1].receivedFiles.some(file => file.name === 'third-peer-regression.bin'), 'transfer after malformed offer');
-                await until(() => peers[0].sendQueue.at(-1)?.status === 'sent', 'transfer after malformed offer committed');
-                await verify(peers[1].receivedFiles.find(file => file.name === 'third-peer-regression.bin')!);
-                append('PASS: existing peer transferred exact bytes after third-peer negotiation failure');
-                for (const peer of peers) for (const meta of peer.receivedFiles) await deleteFile(meta.fileId);
-                peers.forEach(peer => peer.leaveRoom());
-                append('ALL THREE-PEER TESTS PASSED');
+            if (membershipMode || groupMode || failureMode) {
+                await runTwoMemberCapacityTest(room, append, membershipMode || failureMode);
+                append('TWO-MEMBER CAPACITY AND RECOVERY TESTS PASSED');
                 return;
             }
             if (new URLSearchParams(location.search).has('rooms')) {
@@ -319,61 +276,6 @@ function Tests() {
                 append('PASS: both peers use temporary room type and received files are removed on leave');
                 setMounted(false);
                 append('ROOM LIFECYCLE TESTS PASSED');
-                return;
-            }
-            if (new URLSearchParams(location.search).has('group')) {
-                append('Joining a three-member room and checking direct recipient routes...');
-                peers[0].join(room, 'persistent');
-                await until(() => peers[0].inRoom, 'group creator joined');
-                peers[1].join(room);
-                peers[2].join(room);
-                await until(() => peers.slice(0, 3).every(peer => peer.connected && peer.members.length === 2), 'three-member mesh');
-                const recipientId = peers[1].selfPeerId;
-                peers[0].setSelectedPeerIds([recipientId]);
-                peers[2].setSelectedPeerIds([recipientId]);
-                await until(() => peers[0].selectedPeerIds[0] === recipientId && peers[2].selectedPeerIds[0] === recipientId, 'target selections applied');
-                await Promise.all([
-                    peers[0].addFilesToQueue([source(96 * 1024 + 13, 'from-peer-a.bin', 17)]),
-                    peers[2].addFilesToQueue([source(80 * 1024 + 7, 'from-peer-c.bin', 83)]),
-                ]);
-                await until(() =>
-                    peers[1].receivedFiles.some(file => file.name === 'from-peer-a.bin') &&
-                    peers[1].receivedFiles.some(file => file.name === 'from-peer-c.bin') &&
-                    peers[0].sendQueue.some(file => file.file.name === 'from-peer-a.bin' && file.status === 'sent') &&
-                    peers[2].sendQueue.some(file => file.file.name === 'from-peer-c.bin' && file.status === 'sent'),
-                'two concurrent targeted sends');
-                const fromA = peers[1].receivedFiles.find(file => file.name === 'from-peer-a.bin')!;
-                const fromC = peers[1].receivedFiles.find(file => file.name === 'from-peer-c.bin')!;
-                await verify(fromA, 17);
-                await verify(fromC, 83);
-                if (fromA.fileId === fromC.fileId || fromA.sourcePeerId !== peers[0].selfPeerId || fromC.sourcePeerId !== peers[2].selfPeerId) {
-                    throw new Error('Incoming copies were not kept distinct by source');
-                }
-                const sentA = peers[0].sendQueue.find(file => file.file.name === 'from-peer-a.bin')!;
-                const sentC = peers[2].sendQueue.find(file => file.file.name === 'from-peer-c.bin')!;
-                if (sentA.recipientIds.join() !== recipientId || sentC.recipientIds.join() !== recipientId ||
-                    peers[2].onlineFiles.some(file => file.name === 'from-peer-a.bin') ||
-                    peers[0].onlineFiles.some(file => file.name === 'from-peer-c.bin')) {
-                    throw new Error('A file catalog reached an unselected room member');
-                }
-                peers[0].sendChatMessage('group sender identity');
-                await until(() => peers[1].chatMessages.some(message => message.content === 'group sender identity'), 'group chat');
-                if (peers[1].chatMessages.find(message => message.content === 'group sender identity')?.senderId !== peers[0].selfPeerId) {
-                    throw new Error('Group chat sender identity did not match the sending peer');
-                }
-                append('PASS: two simultaneous, byte-verified targeted copies; unselected catalog stayed private; chat identity is peer-based');
-                peers[2].leaveRoom();
-                await until(() => !peers[2].inRoom && peers[0].connected && peers[1].connected, 'third member leaves while pair remains');
-                peers[0].setSelectedPeerIds([recipientId]);
-                await peers[0].addFilesToQueue([source(32 * 1024 + 1, 'after-member-left.bin', 41)]);
-                await until(() => peers[1].receivedFiles.some(file => file.name === 'after-member-left.bin'), 'remaining pair transfer');
-                await verify(peers[1].receivedFiles.find(file => file.name === 'after-member-left.bin')!, 41);
-                peers[2].join(room);
-                await until(() => peers.slice(0, 3).every(peer => peer.connected && peer.members.length === 2), 'third member rejoins');
-                append('PASS: remaining pair transferred while one member was gone; that member rejoined successfully');
-                for (const peer of peers.slice(0, 3)) peer.leaveRoom();
-                setMounted(false);
-                append('THREE-PEER GROUP TESTS PASSED');
                 return;
             }
             peers[0].join(room);

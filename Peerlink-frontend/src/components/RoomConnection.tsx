@@ -14,7 +14,7 @@ interface RoomConnectionProps {
     connected: boolean;
     inRoom: boolean;
     connectionType: ConnectionType;
-    signalingStatus: "idle" | "connecting" | "waiting" | "negotiating" | "offline";
+    signalingStatus: "idle" | "connecting" | "waiting" | "negotiating" | "offline" | "full";
     roomType: RoomType;
     generateRoomId: () => string;
     avatar: string;
