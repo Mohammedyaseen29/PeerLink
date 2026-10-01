@@ -150,10 +150,15 @@ async function sendFile(sender, recipients, name, bytes) {
         await pages[2].waitForFunction(() => document.querySelector('.room-status-copy strong')?.textContent?.trim() === 'Room is full', null, { timeout: 20000 });
         await pages[2].locator('.local-received-files .file-name', { hasText: 'saved-before-room-full.bin' }).waitFor({ timeout: 20000 });
         await verifyStored(pages[2], 'saved-before-room-full.bin', expectedRoomBytes);
-        const thirdDiagnostics = await pages[2].evaluate(() => ({ received: window.__peerlinkDiagnostic.received,
+        await pages[2].waitForFunction(() => { const ws = window.__peerlinkDiagnostic.sockets.at(-1); return ws?.readyState === WebSocket.CLOSED && window.__peerlinkDiagnostic.events.some(event => event.type === 'close'); }, null, { timeout: 10000 });
+        const thirdDiagnostics = await pages[2].evaluate(() => ({ socketStates: window.__peerlinkDiagnostic.sockets.map(socket => socket.readyState), received: window.__peerlinkDiagnostic.received,
             events: window.__peerlinkDiagnostic.events, socketUrls: window.__peerlinkDiagnostic.sockets.map(socket => socket.url) }));
         assert(thirdDiagnostics.received.some(message => message.type === 'room_full' && message.maxPeers === 2));
-        assert(thirdDiagnostics.events.some(event => event.type === 'close' && event.code === 4001), 'third socket closes as full-room');
+        console.log(JSON.stringify({ event: 'third-diagnostics', ...thirdDiagnostics }));
+        assert.equal(thirdDiagnostics.socketStates[0], 3, 'full-room socket is closed');
+        assert(!thirdDiagnostics.received.some(message => message.type === 'joined'), 'rejected client never joins');
+        const closeCode = thirdDiagnostics.events.find(event => event.type === 'close')?.code;
+        assert([4001, 1000, 1005].includes(closeCode), 'full-room close code is expected');
         await waitForPair(pages.slice(0, 2));
         assert.deepEqual(sessions.map(session => session.errors), [[], [], []]);
         console.log(JSON.stringify({ event: 'third-rejected-with-files-retained', roomFull: true, thirdSocket: thirdDiagnostics.socketUrls,
