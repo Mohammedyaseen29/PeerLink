@@ -10,7 +10,10 @@ The frontend signaling environment must point to `ws://localhost:8787`.
 - `/transfer-test.html?quick`: same checks with an 8 MiB large file.
 - `/transfer-test.html?group`: checks three-member recipient selection, exact transfers, chat identity, and cleanup.
 - `/transfer-test.html?group-failure`: injects a malformed offer from the third member, confirms the first two links stay connected, then verifies a byte-exact transfer between them.
+- `/transfer-test.html?membership`: mounts three real hooks in one browser page, keeps them idle across heartbeat intervals, checks focus/visibility roster sync and third-peer transfer, closes each endpoint of one RTC pair independently and verifies roster/file preservation through recovery, injects stale reconnect signaling, then drops the third signaling socket to check offline state, temporary-room cleanup, and rejoin.
+- `node tests/membership-browser.cjs`: opens three isolated Chrome contexts against the local app (override `PEERLINK_BASE_URL`, `PEERLINK_CHROME`, and `PLAYWRIGHT_MODULE` as needed). It checks visible counts through idle/focus sync, a dropped RTC link and recovery, byte-exact transfer to both users, third-user signaling loss/offline UI, and rejoin.
 - `/transfer-test.html?rooms`: checks persistent room reopen, preview and download bytes without a peer, deletion, temporary type synchronization, and cleanup on leave.
+- `node tests/signaling-heartbeat.test.mjs` (from `Peerlink-frontend`): runs the actual signaling Worker with a fake clock and socket/storage shims to check alarm scheduling, stale opt-in expiry, legacy compatibility, authoritative room snapshots, and reconnect routing.
 - `/tests/faults.html`: click **Run fault tests**. Injects corrupt hashes, invalid sequence numbers, and a buffer-full send failure through simulated channels, using the real transfer engine and worker.
 - `/tests/transport.html`: click **Compare packet sizes**. Measures raw local WebRTC without hashing, disk persistence, or application state.
 

@@ -46,6 +46,7 @@ function App() {
     join,
     leaveRoom,
     retryConnection,
+    retryPeerConnection,
     addFilesToQueue,
     pauseSending,
     resumeSending,
@@ -237,6 +238,8 @@ function App() {
               onSelectionChange={setSelectedPeerIds}
               username={username}
               avatar={settings.avatar}
+              selfOnline={signalingStatus !== "offline"}
+              onRetryPeer={retryPeerConnection}
             />
 
             <FileUploader

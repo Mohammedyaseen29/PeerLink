@@ -16,6 +16,10 @@ const MAX_CATALOG_MESSAGES = 10_000;
 const MAX_PREVIEW_REQUESTS = 8;
 const PREVIEW_REQUEST_TIMEOUT_MS = 22_000;
 const PREVIEW_BUFFER_HIGH_WATER = 512 * 1024;
+const SIGNALING_HEARTBEAT_INTERVAL_MS = 25_000;
+const SIGNALING_HEARTBEAT_TIMEOUT_MS = 180_000;
+const RECONNECT_DELAYS_MS = [1_000, 5_000, 15_000] as const;
+const RECONNECT_NEGOTIATION_TIMEOUT_MS = 25_000;
 const previewFrameEncoder = new TextEncoder();
 const previewFrameDecoder = new TextDecoder();
 const MIME_TYPE_PATTERN = /^[\w!#$&^_.+-]+\/[\w!#$&^_.+-]+(?:\s*;\s*[\w!#$&^_.+-]+=(?:"[^"\r\n]*"|[\w!#$&^_.+-]+))*$/;
@@ -60,6 +64,8 @@ type PeerSession = {
     username: string;
     avatar?: string;
     generation: string;
+    linkId?: string;
+    supportsReconnect: boolean;
     pc: RTCPeerConnection | null;
     engine: TransferEngine | null;
     control: RTCDataChannel | null;
@@ -78,7 +84,7 @@ type PeerSession = {
     pendingHostRanges: Map<string, AbortController>;
     previewSendChain: Promise<void>;
     receiveClock: { id: string; start: number; update: number };
-    dispose?: () => void;
+    dispose?: (retry?: boolean) => void;
 };
 
 function safeMimeType(value: string): string {
@@ -216,6 +222,7 @@ export function useP2P() {
     const queue = useRef<QueuedFile[]>([]);
     // A room owns one signaling socket and one independent session per remote peer.
     const sessions = useRef(new Map<string, PeerSession>());
+    const roomMembers = useRef(new Map<string, PeerMember>());
     const selfPeerIdRef = useRef('');
     const selectedPeerIdsRef = useRef<string[]>([]);
     const activeRecipientTransfers = useRef(new Set<string>());
@@ -234,6 +241,8 @@ export function useP2P() {
         return aggregateMetrics.current;
     };
     const ws = useRef<WebSocket | null>(null);
+    const clearSignalingMonitor = useRef<() => void>(() => undefined);
+    const retryPeerRef = useRef<(peerId: string) => void>(() => undefined);
     const currentRoom = useRef('');
     const temporary = useRef(false);
     const live = useRef(true);
@@ -460,7 +469,7 @@ export function useP2P() {
         for (const requestId of [...pendingRemoteRanges.current.keys()]) {
             settleRemoteRange(requestId, null, new Error('Peer disconnected.'), false);
         }
-        for (const session of [...sessions.current.values()]) session.dispose?.();
+        for (const session of [...sessions.current.values()]) session.dispose?.(false);
         replaceOnlineFiles([]);
         if (live.current) {
             setConnected(false); setConnectionType('disconnected'); setCurrentReceiving(null); setCurrentReceivings([]);
@@ -475,8 +484,9 @@ export function useP2P() {
             live.current = false;
             clearTimeout(toastTimer.current);
             broker.dispose();
+            clearSignalingMonitor.current();
             if (previewBroker.current === broker) previewBroker.current = null;
-            for (const session of [...sessions.current.values()]) session.dispose?.();
+            for (const session of [...sessions.current.values()]) session.dispose?.(false);
             disconnectPeer();
             if (ws.current) { ws.current.onclose = null; ws.current.onmessage = null; ws.current.close(); ws.current = null; }
             if (temporary.current && currentRoom.current) void clearTemporaryFiles(currentRoom.current).catch(() => undefined);
@@ -531,6 +541,8 @@ export function useP2P() {
     };
     const updateMember = (session: PeerSession, status: PeerMember['status'], connection: ConnectionType = session.connectionType) => {
         session.status = status; session.connectionType = connection;
+        const member = roomMembers.current.get(session.peerId);
+        if (member) roomMembers.current.set(session.peerId, { ...member, status, connectionType: connection });
         setMembers(current => current.map(member => member.peerId === session.peerId ? { ...member, status, connectionType: connection } : member));
         const liveSessions = [...sessions.current.values()].filter(item => item.status === 'connected');
         setHasPeer(liveSessions.length > 0);
@@ -615,27 +627,30 @@ export function useP2P() {
             if (!hasPending && !isActive) session.engine?.releaseIdleWorker();
         }
     }
-    const createPeerSession = (member: Pick<PeerMember, 'peerId' | 'username' | 'avatar'>) => {
+    const createPeerSession = (member: Pick<PeerMember, 'peerId' | 'username' | 'avatar' | 'supportsReconnect'>,
+        linkId?: string, onTransportLost?: (session: PeerSession) => void, onTransportConnected?: (session: PeerSession) => void) => {
         if (sessions.current.has(member.peerId)) return sessions.current.get(member.peerId)!;
-        const session: PeerSession = { ...member, generation: crypto.randomUUID(), pc: null, engine: null, control: null, data: null, preview: null,
+        const session: PeerSession = { ...member, supportsReconnect: member.supportsReconnect === true, linkId,
+            generation: crypto.randomUUID(), pc: null, engine: null, control: null, data: null, preview: null,
             candidates: [], status: 'connecting', connectionType: 'disconnected', outgoingCatalogRevision: 0, incomingCatalogRevision: 0,
             incomingCatalog: null, sharedSources: new Map(), lastCatalogFingerprint: '', aliasesByRemoteId: new Map(), remoteFilesByAlias: new Map(),
             pendingHostRanges: new Map(), previewSendChain: Promise.resolve(), receiveClock: { id: '', start: 0, update: 0 } };
         sessions.current.set(session.peerId, session);
-        setMembers(current => current.some(item => item.peerId === member.peerId) ? current : [...current, { ...member, connectionType: 'disconnected', status: 'connecting' }]);
+        setMembers(current => current.some(item => item.peerId === member.peerId)
+            ? current.map(item => item.peerId === member.peerId ? { ...item, ...member, connectionType: 'disconnected', status: 'connecting' } : item)
+            : [...current, { ...member, connectionType: 'disconnected', status: 'connecting' }]);
         const peer = new RTCPeerConnection({ iceServers: ICE_SERVERS }); session.pc = peer;
         const commands = peer.createDataChannel('control', { negotiated: true, id: 0, ordered: true });
         const chunks = peer.createDataChannel('data', { negotiated: true, id: 1, ordered: true });
         const previews = peer.createDataChannel('preview', { negotiated: true, id: 2, ordered: true });
         session.control = commands; session.data = chunks; session.preview = previews;
         previews.binaryType = 'arraybuffer'; previews.bufferedAmountLowThreshold = PREVIEW_BUFFER_HIGH_WATER / 2;
-        const closeSession = () => {
+        const closeSession = (retry = true) => {
             if (sessions.current.get(session.peerId) !== session) return;
             for (const [id, pending] of pendingRemoteRanges.current) if (pending.peerId === session.peerId) settleRemoteRange(id, null, new Error('Peer disconnected.'), false);
             for (const controller of session.pendingHostRanges.values()) controller.abort('Peer disconnected');
             session.pendingHostRanges.clear();
             sessions.current.delete(session.peerId);
-            setSelectedPeerIds(current => current.filter(peerId => peerId !== session.peerId));
             changeQueue(items => items.map(item => {
                 const recipients = item.recipients.map(recipient => recipient.peerId === session.peerId && ['pending', 'sending', 'paused'].includes(recipient.status)
                     ? { ...recipient, status: 'failed' as const } : recipient);
@@ -645,18 +660,23 @@ export function useP2P() {
             }), true);
             session.engine?.dispose(); syncAggregateMetrics(); session.pc?.close(); session.remoteFilesByAlias.clear(); session.sharedSources.clear();
             if (live.current) {
-                setMembers(current => current.filter(item => item.peerId !== session.peerId));
+                const member = roomMembers.current.get(session.peerId);
+                if (member) roomMembers.current.set(session.peerId, { ...member, status: 'disconnected', connectionType: 'disconnected' });
+                setMembers(current => current.map(item => item.peerId === session.peerId
+                    ? { ...item, status: 'disconnected', connectionType: 'disconnected' } : item));
                 setCurrentReceivings(current => current.filter(item => item.peerId !== session.peerId));
                 setCurrentReceiving(current => current?.peerId === session.peerId ? null : current);
             }
             refreshGroupOnlineFiles();
-            const remaining = sessions.current.size > 0;
+            const liveSessions = [...sessions.current.values()].filter(item => item.status === 'connected');
             if (live.current) {
-                setHasPeer(remaining); setConnected([...sessions.current.values()].some(item => item.status === 'connected'));
-                setConnectionType(remaining ? 'p2p' : 'disconnected'); setSignalingStatus(remaining ? 'negotiating' : 'waiting');
+                setHasPeer(liveSessions.length > 0); setConnected(liveSessions.length > 0);
+                setConnectionType(liveSessions.length ? (liveSessions.some(item => item.connectionType === 'relay') ? 'relay' : 'p2p') : 'disconnected');
+                setSignalingStatus(liveSessions.length ? 'negotiating' : 'waiting');
             }
+            if (retry) onTransportLost?.(session);
         };
-        session.dispose = closeSession;
+        session.dispose = (retry = true) => closeSession(retry);
         previews.onmessage = event => {
             const decoded = decodePreviewFrame(event.data); if (!decoded) return;
             const frame = decoded.header; const pending = pendingRemoteRanges.current.get(frame.requestId);
@@ -690,6 +710,7 @@ export function useP2P() {
         transferEngines.current.add(session.engine);
         const opened = () => {
             if (sessions.current.get(session.peerId) !== session || commands.readyState !== 'open' || chunks.readyState !== 'open') return;
+            onTransportConnected?.(session);
             updateMember(session, 'connected', 'p2p'); setSignalingStatus('negotiating');
             publishSessionCatalog(session); scheduleRecipientTransfers();
             void peer.getStats().then(stats => {
@@ -701,7 +722,7 @@ export function useP2P() {
             }).catch(() => undefined);
         };
         commands.onopen = opened; chunks.onopen = opened;
-        commands.onclose = closeSession; chunks.onclose = closeSession; previews.onclose = closeSession;
+        commands.onclose = () => closeSession(true); chunks.onclose = () => closeSession(true); previews.onclose = () => closeSession(true);
         peer.onconnectionstatechange = () => { if (peer.connectionState === 'failed' || peer.connectionState === 'closed') closeSession(); };
         commands.onmessage = ({ data: text }) => {
             try {
@@ -739,7 +760,7 @@ export function useP2P() {
         };
         peer.onicecandidate = ({ candidate }) => {
             if (candidate && ws.current?.readyState === WebSocket.OPEN) ws.current.send(JSON.stringify({ type: 'ice_candidate', roomId: currentRoom.current,
-                targetPeerId: session.peerId, payload: candidate }));
+                targetPeerId: session.peerId, ...(session.linkId ? { linkId: session.linkId } : {}), payload: candidate }));
         };
         return session;
     };
@@ -755,13 +776,38 @@ export function useP2P() {
         let joinedRoom = false;
         let signaling = Promise.resolve();
         const offering = new Set<string>();
-        const closeAll = () => { for (const session of [...sessions.current.values()]) session.dispose?.(); };
+        const roomPeers = roomMembers.current;
+        roomPeers.clear();
+        const recovery = new Map<string, { attempts: number; inFlight: boolean; requested: boolean; timer?: number; timeout?: number }>();
+        let heartbeatTimer: number | undefined;
+        let lastHeartbeatAckAt = Date.now();
+        let heartbeatGraceUntil = 0;
+        const clearRecovery = (peerId: string) => {
+            const state = recovery.get(peerId);
+            if (state?.timer !== undefined) window.clearTimeout(state.timer);
+            if (state?.timeout !== undefined) window.clearTimeout(state.timeout);
+            recovery.delete(peerId);
+        };
+        const onTransportConnected = (session: PeerSession) => clearRecovery(session.peerId);
+        const clearMonitoring = () => {
+            if (heartbeatTimer !== undefined) window.clearInterval(heartbeatTimer);
+            heartbeatTimer = undefined;
+            window.removeEventListener('focus', onWindowFocus);
+            document.removeEventListener('visibilitychange', onVisibilityChange);
+            for (const peerId of recovery.keys()) clearRecovery(peerId);
+            if (clearSignalingMonitor.current === clearMonitoring) clearSignalingMonitor.current = () => undefined;
+            retryPeerRef.current = () => undefined;
+        };
+        clearSignalingMonitor.current = clearMonitoring;
+        const closeAll = () => { for (const session of [...sessions.current.values()]) session.dispose?.(false); };
         const failSignaling = (message: string) => {
             if (socket !== ws.current) return;
-            showToast(message); setConnectionFormKey(value => value + 1); closeAll();
-            ws.current = null; socket.onclose = null;
+            showToast(message); setConnectionFormKey(value => value + 1); clearMonitoring();
+            ws.current = null; setMembers([]); roomPeers.clear(); setSelectedPeerIds([]);
+            setSelfPeerId(''); selfPeerIdRef.current = '';
+            closeAll(); socket.onclose = null;
             try { socket.close(); } catch { /* Socket already closed. */ }
-            if (live.current) { setHasPeer(false); setSignalingStatus('offline'); }
+            if (live.current) { setHasPeer(false); setConnected(false); setConnectionType('disconnected'); setSignalingStatus('offline'); }
             if (temporary.current) {
                 void clearTemporaryFiles(room).then(() => { if (currentRoom.current === room) replaceReceivedFiles([]); })
                     .catch(error => showToast(`Unable to remove temporary files: ${String(error)}`));
@@ -772,6 +818,46 @@ export function useP2P() {
             if (socket.readyState !== WebSocket.OPEN) throw new Error('The signaling connection is closed.');
             socket.send(JSON.stringify(message));
         };
+        const requestRoomSync = (resuming = false) => {
+            if (!joinedRoom || socket !== ws.current || socket.readyState !== WebSocket.OPEN) return;
+            if (resuming) heartbeatGraceUntil = Date.now() + 45_000;
+            try { send({ type: 'heartbeat', roomId: room }); send({ type: 'sync', roomId: room }); }
+            catch { /* The heartbeat timeout will mark a half-open socket offline. */ }
+        };
+        const onWindowFocus = () => requestRoomSync(true);
+        const onVisibilityChange = () => { if (document.visibilityState === 'visible') requestRoomSync(true); };
+        const startMonitoring = () => {
+            if (heartbeatTimer !== undefined) return;
+            lastHeartbeatAckAt = Date.now();
+            heartbeatTimer = window.setInterval(() => {
+                if (!joinedRoom || socket !== ws.current || socket.readyState !== WebSocket.OPEN) return;
+                if (document.visibilityState === 'visible' && Date.now() - lastHeartbeatAckAt >= SIGNALING_HEARTBEAT_TIMEOUT_MS &&
+                    Date.now() >= heartbeatGraceUntil) {
+                    failSignaling('The room connection was lost. Retry to rejoin and refresh the member list.'); return;
+                }
+                requestRoomSync();
+            }, SIGNALING_HEARTBEAT_INTERVAL_MS);
+            window.addEventListener('focus', onWindowFocus);
+            document.addEventListener('visibilitychange', onVisibilityChange);
+        };
+        let startReconnect = (_peerId: string) => undefined;
+        const onTransportLost = (session: PeerSession) => {
+            offering.delete(session.peerId);
+            if (!live.current || !session.supportsReconnect || socket !== ws.current || socket.readyState !== WebSocket.OPEN) return;
+            const state = recovery.get(session.peerId) || { attempts: 0, inFlight: false, requested: false };
+            recovery.set(session.peerId, state);
+            if (state.timer !== undefined) window.clearTimeout(state.timer);
+            state.timer = undefined;
+            if (state.timeout !== undefined) window.clearTimeout(state.timeout);
+            state.timeout = undefined;
+            state.inFlight = false;
+            if (selfPeerIdRef.current.localeCompare(session.peerId) < 0) startReconnect(session.peerId);
+            else if (!state.requested) {
+                state.requested = true;
+                try { send({ type: 'reconnect_request', roomId: room, targetPeerId: session.peerId }); }
+                catch { state.requested = false; }
+            }
+        };
         const beginOffer = async (session: PeerSession) => {
             const peer = session.pc;
             if (!peer || sessions.current.get(session.peerId) !== session || offering.has(session.peerId) || selfPeerIdRef.current.localeCompare(session.peerId) >= 0) return;
@@ -780,11 +866,70 @@ export function useP2P() {
             if (sessions.current.get(session.peerId) !== session) return;
             await peer.setLocalDescription(offer);
             if (sessions.current.get(session.peerId) !== session) return;
-            send({ type: 'offer', roomId: room, targetPeerId: session.peerId, payload: peer.localDescription });
+            send({ type: 'offer', roomId: room, targetPeerId: session.peerId,
+                ...(session.linkId ? { linkId: session.linkId } : {}), payload: peer.localDescription });
         };
-        const ensureSignaledSession = (peer: { peerId: string; username?: string; avatar?: string }) => {
+        startReconnect = (peerId: string) => {
+            const member = roomPeers.get(peerId);
+            if (!member?.supportsReconnect || selfPeerIdRef.current.localeCompare(peerId) >= 0 || socket !== ws.current || socket.readyState !== WebSocket.OPEN) return;
+            const state = recovery.get(peerId) || { attempts: 0, inFlight: false, requested: false };
+            recovery.set(peerId, state);
+            if (state.inFlight || state.attempts >= RECONNECT_DELAYS_MS.length) return;
+            const delay = RECONNECT_DELAYS_MS[state.attempts++];
+            state.inFlight = true; state.requested = false;
+            state.timer = window.setTimeout(() => {
+                state.timer = undefined;
+                if (socket !== ws.current || socket.readyState !== WebSocket.OPEN || !roomPeers.has(peerId)) { state.inFlight = false; return; }
+                const previous = sessions.current.get(peerId);
+                previous?.dispose?.(false);
+                offering.delete(peerId);
+                const linkId = crypto.randomUUID();
+                const session = createPeerSession(member, linkId, onTransportLost, onTransportConnected);
+                try {
+                    send({ type: 'reconnect', roomId: room, targetPeerId: peerId, linkId });
+                    void beginOffer(session).catch(error => {
+                        if (sessions.current.get(peerId) === session) showToast(`Unable to reconnect to ${session.username}: ${String(error)}`);
+                        session.dispose?.(true);
+                    });
+                    state.timeout = window.setTimeout(() => {
+                        state.timeout = undefined;
+                        if (sessions.current.get(peerId) === session && session.status !== 'connected') {
+                            state.inFlight = false;
+                            session.dispose?.(true);
+                        }
+                    }, RECONNECT_NEGOTIATION_TIMEOUT_MS);
+                } catch {
+                    state.inFlight = false;
+                    session.dispose?.(true);
+                }
+            }, delay);
+        };
+        retryPeerRef.current = (peerId: string) => {
+            const member = roomPeers.get(peerId);
+            if (!member?.supportsReconnect || socket !== ws.current || socket.readyState !== WebSocket.OPEN) return;
+            clearRecovery(peerId);
+            const state = { attempts: 0, inFlight: false, requested: false };
+            recovery.set(peerId, state);
+            if (selfPeerIdRef.current.localeCompare(peerId) < 0) startReconnect(peerId);
+            else {
+                state.requested = true;
+                try { send({ type: 'reconnect_request', roomId: room, targetPeerId: peerId, payload: { manual: true } }); }
+                catch { state.requested = false; }
+            }
+        };
+        const markRecipientUnavailable = (peerId: string) => changeQueue(items => items.map(item => {
+            const recipients = item.recipients.map(recipient => recipient.peerId === peerId && ['pending', 'sending', 'paused'].includes(recipient.status)
+                ? { ...recipient, status: 'failed' as const } : recipient);
+            const statuses = recipients.map(recipient => recipient.status);
+            const status = statuses.every(value => value === 'sent') ? 'sent' : statuses.every(value => value === 'sent' || value === 'failed') ? 'failed' : item.status;
+            return { ...item, recipients, status };
+        }));
+        const ensureSignaledSession = (peer: { peerId: string; username?: string; avatar?: string; supportsReconnect?: boolean }) => {
             if (typeof peer.peerId !== 'string' || !peer.peerId) return null;
-            const session = createPeerSession({ peerId: peer.peerId, username: typeof peer.username === 'string' ? peer.username : 'Peer', avatar: peer.avatar });
+            const details: PeerMember = { peerId: peer.peerId, username: typeof peer.username === 'string' ? peer.username : 'Peer',
+                avatar: peer.avatar, supportsReconnect: peer.supportsReconnect === true, connectionType: 'disconnected', status: 'connecting' };
+            roomPeers.set(peer.peerId, details);
+            const session = createPeerSession(details, undefined, onTransportLost, onTransportConnected);
             void beginOffer(session).catch(error => {
                 if (socket !== ws.current || sessions.current.get(session.peerId) !== session) return;
                 offering.delete(session.peerId);
@@ -792,6 +937,36 @@ export function useP2P() {
                 session.dispose?.();
             });
             return session;
+        };
+        const reconcileRoomPeers = (rawPeers: unknown[], authoritative: boolean) => {
+            const peers = rawPeers.filter((value): value is { peerId: string; username?: string; avatar?: string; supportsReconnect?: boolean } =>
+                !!value && typeof value === 'object' && typeof (value as { peerId?: unknown }).peerId === 'string')
+                .map(peer => ({ peerId: peer.peerId, username: typeof peer.username === 'string' ? peer.username : 'Peer',
+                    avatar: typeof peer.avatar === 'string' ? peer.avatar : undefined, supportsReconnect: peer.supportsReconnect === true }));
+            const known = new Set(roomPeers.keys());
+            if (authoritative) {
+                const present = new Set(peers.map(peer => peer.peerId));
+                for (const peerId of known) {
+                    if (present.has(peerId)) continue;
+                    sessions.current.get(peerId)?.dispose?.(false);
+                    markRecipientUnavailable(peerId);
+                    clearRecovery(peerId); offering.delete(peerId); roomPeers.delete(peerId);
+                    setSelectedPeerIds(current => current.filter(id => id !== peerId));
+                }
+            }
+            for (const peer of peers) {
+                const session = sessions.current.get(peer.peerId);
+                const previous = roomPeers.get(peer.peerId);
+                roomPeers.set(peer.peerId, { ...peer, status: session?.status ?? previous?.status ?? 'connecting',
+                    connectionType: session?.connectionType ?? previous?.connectionType ?? 'disconnected' });
+            }
+            setMembers(current => peers.map(peer => {
+                const session = sessions.current.get(peer.peerId);
+                const previous = current.find(item => item.peerId === peer.peerId);
+                return { ...peer, status: session?.status ?? previous?.status ?? 'connecting',
+                    connectionType: session?.connectionType ?? previous?.connectionType ?? 'disconnected' };
+            }));
+            for (const peer of peers) if (!known.has(peer.peerId)) ensureSignaledSession(peer);
         };
         socket.onopen = () => {
             void (async () => {
@@ -801,7 +976,8 @@ export function useP2P() {
                     else if (newRoomType === 'persistent') void navigator.storage?.persist?.().catch(() => undefined);
                     if (!live.current || socket !== ws.current || currentRoom.current !== room) return;
                     if (newRoomType === 'temporary') replaceReceivedFiles([]);
-                    send({ type: 'join', protocolVersion: 2, roomId: room, roomType: newRoomType, username, avatar: options.current.avatar });
+                    send({ type: 'join', protocolVersion: 2, roomId: room, roomType: newRoomType, username, avatar: options.current.avatar,
+                        heartbeat: true, supportsReconnect: true });
                 } catch (error) { failSignaling(error instanceof Error ? error.message : String(error)); }
             })();
         };
@@ -811,10 +987,13 @@ export function useP2P() {
             if (event.code === 4001) showToast('This room is full. Rooms support up to 4 people.');
             else if (event.code === 4002) showToast('That room ID is invalid.');
             else if (event.code === 4003) showToast('This room has older PeerLink clients. Everyone must update or reload the app, leave the room, and rejoin.');
+            else if (event.code === 4004) showToast('The room connection expired. Retry to rejoin and refresh the member list.');
             else if (joinedRoom) showToast('The signaling connection closed.');
             else showToast('The signaling connection ended before joining.');
-            setConnectionFormKey(value => value + 1); closeAll(); ws.current = null;
-            if (live.current) { setHasPeer(false); setSignalingStatus('offline'); }
+            setConnectionFormKey(value => value + 1); clearMonitoring(); ws.current = null;
+            setMembers([]); roomPeers.clear(); setSelectedPeerIds([]); setSelfPeerId(''); selfPeerIdRef.current = '';
+            closeAll();
+            if (live.current) { setHasPeer(false); setConnected(false); setConnectionType('disconnected'); setSignalingStatus('offline'); }
             if (temporary.current) {
                 void clearTemporaryFiles(room).then(() => { if (currentRoom.current === room) replaceReceivedFiles([]); })
                     .catch(error => showToast(`Unable to remove temporary files: ${String(error)}`));
@@ -864,33 +1043,95 @@ export function useP2P() {
                         if (!live.current || socket !== ws.current || currentRoom.current !== room) return;
                         replaceReceivedFiles(files.filter(file => file.roomType !== 'temporary'));
                     }
-                    const peers = msg.peers.filter((peer: unknown) => !!peer && typeof peer === 'object' && typeof (peer as { peerId?: unknown }).peerId === 'string') as Array<{ peerId: string; username?: string; avatar?: string }>;
-                    for (const peer of peers) ensureSignaledSession(peer);
-                    setSelectedPeerIds(peers.map(peer => peer.peerId));
-                    setHasPeer(peers.length > 0); setSignalingStatus(peers.length ? 'negotiating' : 'waiting');
+                    reconcileRoomPeers(msg.peers, true);
+                    const peerIds = msg.peers.map((peer: { peerId?: unknown }) => typeof peer?.peerId === 'string' ? peer.peerId : '').filter(Boolean);
+                    setSelectedPeerIds(peerIds);
+                    setHasPeer(peerIds.length > 0); setSignalingStatus(peerIds.length ? 'negotiating' : 'waiting');
+                    startMonitoring();
+                    return;
+                }
+                if (msg.type === 'heartbeat_ack') { lastHeartbeatAckAt = Date.now(); heartbeatGraceUntil = 0; return; }
+                if (msg.type === 'room_state') {
+                    if (msg.roomId !== room || !Array.isArray(msg.peers)) return;
+                    lastHeartbeatAckAt = Date.now();
+                    heartbeatGraceUntil = 0;
+                    reconcileRoomPeers(msg.peers, true);
                     return;
                 }
                 if (msg.type === 'peer_joined' && msg.peer) {
                     if (typeof msg.peer !== 'object' || Array.isArray(msg.peer)) return;
-                    const peer = msg.peer as { peerId?: unknown; username?: unknown; avatar?: unknown };
+                    const peer = msg.peer as { peerId?: unknown; username?: unknown; avatar?: unknown; supportsReconnect?: unknown };
                     if (typeof peer.peerId !== 'string') return;
-                    const session = ensureSignaledSession({ peerId: peer.peerId,
-                        username: typeof peer.username === 'string' ? peer.username : undefined,
-                        avatar: typeof peer.avatar === 'string' ? peer.avatar : undefined });
-                    if (session) {
-                        setSelectedPeerIds(current => current.includes(session.peerId) ? current : [...current, session.peerId]);
-                        setHasPeer(true); setSignalingStatus('negotiating'); showToast(`${session.username} joined the room`, 'success');
-                    }
+                    const wasKnown = roomPeers.has(peer.peerId);
+                    const nextPeer = { peerId: peer.peerId, username: typeof peer.username === 'string' ? peer.username : 'Peer',
+                        avatar: typeof peer.avatar === 'string' ? peer.avatar : undefined, supportsReconnect: peer.supportsReconnect === true };
+                    reconcileRoomPeers([...roomPeers.values(), nextPeer], false);
+                    setSelectedPeerIds(current => current.includes(peer.peerId as string) ? current : [...current, peer.peerId as string]);
+                    setHasPeer(true); setSignalingStatus('negotiating');
+                    if (!wasKnown) showToast(`${nextPeer.username} joined the room`, 'success');
                     return;
                 }
                 if (msg.type === 'peer_left' && typeof msg.peerId === 'string') {
-                    sessions.current.get(msg.peerId)?.dispose?.(); offering.delete(msg.peerId); return;
+                    sessions.current.get(msg.peerId)?.dispose?.(false); markRecipientUnavailable(msg.peerId);
+                    clearRecovery(msg.peerId); offering.delete(msg.peerId); roomPeers.delete(msg.peerId);
+                    setMembers(current => current.filter(member => member.peerId !== msg.peerId));
+                    setSelectedPeerIds(current => current.filter(peerId => peerId !== msg.peerId));
+                    setHasPeer([...sessions.current.values()].some(session => session.status === 'connected'));
+                    if (![...sessions.current.values()].some(session => session.status === 'connected')) setSignalingStatus('waiting');
+                    return;
+                }
+                if (msg.type === 'reconnect_request') {
+                    if (typeof msg.fromPeerId === 'string' && selfPeerIdRef.current.localeCompare(msg.fromPeerId) < 0) {
+                        const manual = (msg.payload as { manual?: unknown } | undefined)?.manual === true;
+                        if (manual) {
+                            clearRecovery(msg.fromPeerId);
+                            recovery.set(msg.fromPeerId, { attempts: 0, inFlight: false, requested: false });
+                        }
+                        startReconnect(msg.fromPeerId);
+                    }
+                    return;
+                }
+                if (msg.type === 'reconnect') {
+                    if (typeof msg.fromPeerId !== 'string' || typeof msg.linkId !== 'string' ||
+                        !/^[A-Za-z0-9_-]{1,128}$/.test(msg.linkId) || selfPeerIdRef.current.localeCompare(msg.fromPeerId) <= 0) return;
+                    const details = roomPeers.get(msg.fromPeerId) || (msg.fromPeer && typeof msg.fromPeer === 'object'
+                        ? { ...(msg.fromPeer as { peerId: string; username?: string; avatar?: string; supportsReconnect?: boolean }),
+                            username: typeof (msg.fromPeer as { username?: unknown }).username === 'string' ? (msg.fromPeer as { username: string }).username : 'Peer',
+                            supportsReconnect: (msg.fromPeer as { supportsReconnect?: unknown }).supportsReconnect === true,
+                            connectionType: 'disconnected' as const, status: 'connecting' as const }
+                        : undefined);
+                    if (!details?.supportsReconnect) return;
+                    const current = sessions.current.get(msg.fromPeerId);
+                    if (current?.linkId === msg.linkId) return;
+                    const state = recovery.get(msg.fromPeerId) || { attempts: 0, inFlight: false, requested: false };
+                    if (state.timer !== undefined) window.clearTimeout(state.timer);
+                    if (state.timeout !== undefined) window.clearTimeout(state.timeout);
+                    state.inFlight = true; state.requested = false; recovery.set(msg.fromPeerId, state);
+                    current?.dispose?.(false); offering.delete(msg.fromPeerId);
+                    const next = createPeerSession(details, msg.linkId, onTransportLost, onTransportConnected);
+                    state.timeout = window.setTimeout(() => {
+                        state.timeout = undefined;
+                        if (sessions.current.get(msg.fromPeerId as string) === next && next.status !== 'connected') {
+                            state.inFlight = false; next.dispose?.(true);
+                        }
+                    }, RECONNECT_NEGOTIATION_TIMEOUT_MS);
+                    return;
                 }
                 if (msg.type === 'offer' || msg.type === 'answer' || msg.type === 'ice_candidate') {
                     if (typeof msg.fromPeerId !== 'string') return;
                     let session = sessions.current.get(msg.fromPeerId);
-                    if (!session && msg.type === 'offer') session = createPeerSession({ peerId: msg.fromPeerId, username: 'Peer' });
+                    const linkId = typeof msg.linkId === 'string' && /^[A-Za-z0-9_-]{1,128}$/.test(msg.linkId) ? msg.linkId : undefined;
+                    if (!session && msg.type === 'offer') {
+                        const details = roomPeers.get(msg.fromPeerId) || { peerId: msg.fromPeerId,
+                            username: (msg.fromPeer as { username?: string } | undefined)?.username || 'Peer',
+                            supportsReconnect: (msg.fromPeer as { supportsReconnect?: unknown } | undefined)?.supportsReconnect === true,
+                            connectionType: 'disconnected' as const, status: 'connecting' as const };
+                        roomPeers.set(msg.fromPeerId, details);
+                        session = createPeerSession(details, linkId, onTransportLost, onTransportConnected);
+                    }
                     const peer = session?.pc; if (!session || !peer) return;
+                    if (session.linkId && session.linkId !== linkId) return;
+                    if (linkId && !session.linkId) session.linkId = linkId;
                     try {
                         if (msg.type === 'ice_candidate') {
                             if (peer.remoteDescription) {
@@ -907,7 +1148,8 @@ export function useP2P() {
                             if (msg.type === 'offer') {
                                 await peer.setLocalDescription(await peer.createAnswer());
                                 if (socket !== ws.current || sessions.current.get(session.peerId) !== session) return;
-                                send({ type: 'answer', roomId: room, targetPeerId: session.peerId, payload: peer.localDescription });
+                                send({ type: 'answer', roomId: room, targetPeerId: session.peerId,
+                                    ...(session.linkId ? { linkId: session.linkId } : {}), payload: peer.localDescription });
                             }
                         }
                     } catch (error) {
@@ -923,12 +1165,13 @@ export function useP2P() {
     const retryConnection = () => {
         if (currentRoom.current && !ws.current) join(currentRoom.current, temporary.current ? 'temporary' : 'persistent');
     };
+    const retryPeerConnection = useCallback((peerId: string) => retryPeerRef.current(peerId), []);
 
     const addFilesToQueue = async (files: File[]) => {
         const usedIds = new Set(queue.current.map(item => item.id));
-        const recipientIds = selectedPeerIdsRef.current.filter(peerId => sessions.current.has(peerId));
+        const recipientIds = selectedPeerIdsRef.current.filter(peerId => roomMembers.current.has(peerId));
         const recipients = recipientIds.map(peerId => {
-            const peer = sessions.current.get(peerId)!;
+            const peer = sessions.current.get(peerId) || roomMembers.current.get(peerId)!;
             return { peerId, peerName: peer.username, status: 'pending' as const, progress: 0, bytesTransferred: 0 };
         });
         const items = files.map(file => {
@@ -991,6 +1234,7 @@ export function useP2P() {
         if (!room) return;
         const wasTemporary = temporary.current;
         const socket = ws.current;
+        clearSignalingMonitor.current();
         ws.current = null;
         if (socket) {
             socket.onclose = null; socket.onmessage = null; socket.onerror = null;
@@ -999,11 +1243,11 @@ export function useP2P() {
             }
             socket.close();
         }
-        for (const session of [...sessions.current.values()]) session.dispose?.();
+        for (const session of [...sessions.current.values()]) session.dispose?.(false);
         disconnectPeer();
         currentRoom.current = ''; temporary.current = false;
         setRoomId(''); setRoomType('persistent'); setInRoom(false); setHasPeer(false); setSignalingStatus('idle');
-        setSelfPeerId(''); selfPeerIdRef.current = ''; setMembers([]); setSelectedPeerIds([]); setCurrentReceivings([]);
+        setSelfPeerId(''); selfPeerIdRef.current = ''; setMembers([]); roomMembers.current.clear(); setSelectedPeerIds([]); setCurrentReceivings([]);
         setConnectionFormKey(value => value + 1);
         queue.current = []; activeRecipientTransfers.current.clear(); setSendQueue([]);
         replaceReceivedFiles([]); replaceOnlineFiles([]); setChatMessages([]); setUnreadCount(0);
@@ -1083,6 +1327,7 @@ export function useP2P() {
         members, selectedPeerIds, setSelectedPeerIds, selfPeerId,
         connectionFormKey, chatMessages, unreadCount, settings, username, isChatOpen, isSettingsOpen, inRoom, hasPeer, toast,
         setRoomId, join, retryConnection, leaveRoom, addFilesToQueue, pauseSending, resumeSending, removeFromQueue, clearAllQueue,
+        retryPeerConnection,
         downloadFile, clearRoom, deleteReceivedFile, openPreview, closePreview, sendChatMessage, markChatRead, updateSettings, setIsChatOpen,
         setIsSettingsOpen, generateRoomId, dismissToast, notifyError: showToast, transferMetrics: syncAggregateMetrics(), getTransferDiagnostics };
 }

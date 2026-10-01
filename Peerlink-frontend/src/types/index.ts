@@ -24,6 +24,7 @@ export type PeerMember = {
   peerId: string;
   username: string;
   avatar?: string;
+  supportsReconnect?: boolean;
   connectionType: ConnectionType;
   status: "connecting" | "connected" | "disconnected";
 };

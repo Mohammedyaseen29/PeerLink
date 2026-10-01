@@ -6,11 +6,33 @@ import { openDB, deleteFile, getChunkIndices, getFilesInRoom, releasePreviewUrl,
 type Peer = ReturnType<typeof useP2P>;
 const peers: Peer[] = [];
 const signalingSockets: Array<{ socket: WebSocket; peerId?: string }> = [];
+const signaledOffers: Array<{ peerId?: string; targetPeerId?: string; sdp?: string }> = [];
+const reconnectLinks: Array<{ peerId?: string; targetPeerId?: string; linkId?: string }> = [];
+const rtcPeers: RTCPeerConnection[] = [];
+const NativeRTCPeerConnection = window.RTCPeerConnection;
+window.RTCPeerConnection = new Proxy(NativeRTCPeerConnection, {
+    construct(target, args, newTarget) {
+        const peer = Reflect.construct(target, args, newTarget) as RTCPeerConnection;
+        rtcPeers.push(peer);
+        return peer;
+    },
+});
 const nativeWebSocketSend = WebSocket.prototype.send;
 WebSocket.prototype.send = function (data: string | ArrayBufferLike | Blob | ArrayBufferView) {
     if (typeof data === 'string') {
         try {
-            if (JSON.parse(data).type === 'join' && !signalingSockets.some(entry => entry.socket === this)) {
+                const message = JSON.parse(data);
+                if (message.type === 'offer') {
+                    const socketEntry = signalingSockets.find(entry => entry.socket === this);
+                    signaledOffers.push({ peerId: socketEntry?.peerId, targetPeerId: message.targetPeerId,
+                        sdp: message.payload?.sdp });
+                }
+                if (message.type === 'reconnect') {
+                    const socketEntry = signalingSockets.find(entry => entry.socket === this);
+                    reconnectLinks.push({ peerId: socketEntry?.peerId, targetPeerId: message.targetPeerId,
+                        linkId: message.linkId });
+                }
+                if (message.type === 'join' && !signalingSockets.some(entry => entry.socket === this)) {
                 const entry: { socket: WebSocket; peerId?: string } = { socket: this };
                 this.addEventListener('message', event => {
                     try {
@@ -45,6 +67,7 @@ function source(size: number, name: string, seed = 0) {
     for (let remaining = size; remaining > 0; remaining -= content.length) parts.push(content.subarray(0, Math.min(remaining, content.length)));
     return new File(parts, name, { type: 'application/octet-stream' });
 }
+function iceUfrag(sdp?: string) { return sdp?.match(/^a=ice-ufrag:([^\r\n]+)/m)?.[1]; }
 async function verify(meta: FileMetadata, seed = 0) {
     const db = await openDB();
     let offset = 0, index = 0;
@@ -71,12 +94,126 @@ function Tests() {
     const [mounted, setMounted] = useState(true);
     const groupMode = new URLSearchParams(location.search).has('group');
     const failureMode = new URLSearchParams(location.search).has('group-failure');
+    const membershipMode = new URLSearchParams(location.search).has('membership');
     const append = (line: string) => setLog(previous => previous + '\n' + line);
     async function run() {
-        setRunning(true); setLog(groupMode || failureMode ? 'Connecting three real application hooks through local WebSockets...' : 'Connecting two real application hooks through local WebSockets...');
+        setRunning(true); setLog(groupMode || failureMode || membershipMode ? 'Connecting three real application hooks through local WebSockets...' : 'Connecting two real application hooks through local WebSockets...');
         signalingSockets.length = 0;
+        signaledOffers.length = 0;
+        reconnectLinks.length = 0;
         const room = `test-${crypto.randomUUID()}`;
         try {
+            if (membershipMode) {
+                append('Joining three users and separating WebRTC transport failure from signaling departure...');
+                peers[0].join(room, 'temporary');
+                await until(() => peers[0].inRoom && peers[0].selfPeerId && peers[0].signalingStatus === 'waiting',
+                    'membership test creator joined the signaling room');
+                peers[1].join(room); peers[2].join(room);
+                await until(() => peers.slice(0, 3).every(peer => peer.inRoom && peer.members.length === 2 &&
+                    peer.members.every(member => member.status === 'connected')), 'three-member connected mesh');
+                await until(() => signalingSockets.length === 3 && signalingSockets.every(entry => entry.peerId), 'all signaling sockets identified');
+                if (rtcPeers.length !== 6) throw new Error(`Expected six mesh connections, got ${rtcPeers.length}`);
+                append('Holding all three Chrome clients idle across two 25-second heartbeat intervals...');
+                await delay(50_500);
+                if (peers.slice(0, 3).some(peer => !peer.inRoom || peer.members.length !== 2)) {
+                    throw new Error('An idle member disappeared from a room roster after two heartbeat intervals');
+                }
+                window.dispatchEvent(new Event('focus'));
+                document.dispatchEvent(new Event('visibilitychange'));
+                await delay(500);
+                if (peers.slice(0, 3).some(peer => !peer.inRoom || peer.members.length !== 2)) {
+                    throw new Error('Focus/visibility room resync changed the healthy three-member roster');
+                }
+                peers[2].setSelectedPeerIds([peers[1].selfPeerId]);
+                await peers[2].addFilesToQueue([source(7013, 'third-peer-after-idle.bin', 27)]);
+                await until(() => peers[1].receivedFiles.some(meta => meta.name === 'third-peer-after-idle.bin'), 'third-peer transfer after idle');
+                await verify(peers[1].receivedFiles.find(meta => meta.name === 'third-peer-after-idle.bin')!, 27);
+                append('PASS: all 3/4 rosters survived idle heartbeats and focus resync; third-peer transfer succeeded');
+
+                const firstId = peers[0].selfPeerId, secondId = peers[1].selfPeerId;
+                const targetId = secondId;
+                const pairForFirstTwo = (lower: boolean) => {
+                    const pairIds = [firstId, secondId].sort();
+                    const offer = [...signaledOffers].reverse().find(item => item.sdp && item.peerId === pairIds[0] && item.targetPeerId === pairIds[1]);
+                    const ufrag = iceUfrag(offer?.sdp);
+                    if (!ufrag) return undefined;
+                    const sender = rtcPeers.find(pc => iceUfrag(pc.localDescription?.sdp) === ufrag);
+                    const receiver = rtcPeers.find(pc => iceUfrag(pc.remoteDescription?.sdp) === ufrag);
+                    if (!sender || !receiver) return undefined;
+                    return lower ? (offer!.peerId === pairIds[0] ? sender : receiver) : (offer!.peerId === pairIds[1] ? sender : receiver);
+                };
+                const pairIds = [firstId, secondId].sort();
+                let firstRecoveryLink: string | undefined;
+                const openSockets = () => signalingSockets.filter(entry => entry.socket.readyState === WebSocket.OPEN);
+                const file = source(16391, 'membership-survives-rtc-drop.bin', 29);
+                peers[0].setSelectedPeerIds([targetId]);
+                await peers[0].addFilesToQueue([file]);
+                await until(() => peers[1].receivedFiles.some(meta => meta.name === file.name), 'temporary file before transport drop');
+                const saved = peers[1].receivedFiles.find(meta => meta.name === file.name)!;
+                await verify(saved, 29);
+                for (const [direction, lower] of [['lower UUID endpoint', true], ['upper UUID endpoint', false]] as const) {
+                    const failedPeer = pairForFirstTwo(lower);
+                    if (!failedPeer) throw new Error(`Could not map the ${direction} RTCPeerConnection from its signaling SDP`);
+                    failedPeer.close();
+                    await delay(350);
+                    if (openSockets().length !== 3 || peers.slice(0, 3).some(peer => peer.members.length !== 2)) {
+                        throw new Error(`RTC-only failure at ${direction} changed the authoritative 3/4 roster`);
+                    }
+                    await until(() => peers[0].members.find(member => member.peerId === secondId)?.status === 'connected' &&
+                        peers[1].members.find(member => member.peerId === firstId)?.status === 'connected',
+                        `RTC link healed after ${direction} failure`, 45_000);
+                    await until(() => reconnectLinks.some(link => link.peerId === pairIds[0] &&
+                        link.targetPeerId === pairIds[1] && typeof link.linkId === 'string'),
+                        `fresh authenticated link ID after ${direction} failure`, 10_000);
+                    if (lower && !firstRecoveryLink) firstRecoveryLink = reconnectLinks.find(link =>
+                        link.peerId === pairIds[0] && link.targetPeerId === pairIds[1])?.linkId;
+                    if (peers.slice(0, 3).some(peer => peer.members.length !== 2)) {
+                        throw new Error(`Roster changed while healing ${direction} failure`);
+                    }
+                }
+                const latestRecoveryLink = [...reconnectLinks].reverse().find(link =>
+                    link.peerId === pairIds[0] && link.targetPeerId === pairIds[1])?.linkId;
+                if (!firstRecoveryLink || !latestRecoveryLink || firstRecoveryLink === latestRecoveryLink) {
+                    throw new Error('Expected distinct stale and current reconnect link IDs');
+                }
+                const lowerSocket = signalingSockets.find(entry => entry.peerId === pairIds[0])!.socket;
+                lowerSocket.send(JSON.stringify({ type: 'offer', roomId: room, targetPeerId: pairIds[1],
+                    linkId: firstRecoveryLink, payload: { type: 'offer', sdp: 'stale-link-offer' } }));
+                lowerSocket.send(JSON.stringify({ type: 'ice_candidate', roomId: room, targetPeerId: pairIds[1],
+                    linkId: firstRecoveryLink, payload: { candidate: 'candidate:stale', sdpMid: '0', sdpMLineIndex: 0 } }));
+                await delay(350);
+                if (peers.slice(0, 3).some(peer => peer.members.length !== 2) ||
+                    peers[1].members.find(member => member.peerId === firstId)?.status !== 'connected') {
+                    throw new Error('A stale offer or ICE candidate disturbed the recovered link');
+                }
+                if (!(await getFilesInRoom(room)).some(meta => meta.fileId === saved.fileId)) {
+                    throw new Error('Temporary-room file was deleted during RTC-only recovery');
+                }
+                await peers[0].addFilesToQueue([source(9001, 'membership-after-rtc-recovery.bin', 31)]);
+                await until(() => peers[1].receivedFiles.some(meta => meta.name === 'membership-after-rtc-recovery.bin'),
+                    'transfer after transport recovery', 45_000);
+                await verify(peers[1].receivedFiles.find(meta => meta.name === 'membership-after-rtc-recovery.bin')!, 31);
+                append('PASS: WebRTC-only failure retained 3/4 rosters, preserved room files, and recovered peer transfer');
+
+                const thirdEntry = signalingSockets.find(entry => entry.peerId === peers[2].selfPeerId)!;
+                thirdEntry.socket.close();
+                await until(() => peers[0].members.length === 1 && peers[1].members.length === 1 &&
+                    peers[2].signalingStatus === 'offline' && peers[2].members.length === 0,
+                    'signaling departure removes third member from all rosters', 15_000);
+                if ((await getFilesInRoom(room)).some(meta => meta.roomType === 'temporary')) {
+                    throw new Error('Temporary-room data survived signaling membership departure');
+                }
+                append('PASS: signaling loss removes membership and temporary-room data');
+                peers[2].leaveRoom();
+                await until(() => !peers[2].inRoom, 'third member leaves after signaling loss');
+                peers[2].join(room);
+                await until(() => peers.slice(0, 3).every(peer => peer.inRoom && peer.members.length === 2 &&
+                    peer.members.every(member => member.status === 'connected')), 'third member rejoins with fresh roster', 45_000);
+                append('PASS: rejoin restored a converged three-member roster');
+                peers.forEach(peer => peer.leaveRoom());
+                append('ROOM MEMBERSHIP TESTS PASSED');
+                return;
+            }
             if (failureMode) {
                 for (const peer of peers) peer.join(room, 'persistent');
                 await until(() => peers.every(peer => peer.inRoom && peer.members.length === 2), 'three room members joined');
@@ -308,6 +445,6 @@ function Tests() {
         finally { setRunning(false); }
     }
     return <main><h1>PeerLink integration tests</h1><button disabled={running || !mounted} onClick={() => void run()}>Run integration tests</button>
-        {mounted && Array.from({ length: groupMode || failureMode ? 3 : 2 }, (_, index) => <PeerPanel key={index} index={index} />)}<pre style={{ whiteSpace: 'pre-wrap' }}>{log}</pre></main>;
+        {mounted && Array.from({ length: groupMode || failureMode || membershipMode ? 3 : 2 }, (_, index) => <PeerPanel key={index} index={index} />)}<pre style={{ whiteSpace: 'pre-wrap' }}>{log}</pre></main>;
 }
 createRoot(document.getElementById('root')!).render(<StrictMode><Tests /></StrictMode>);

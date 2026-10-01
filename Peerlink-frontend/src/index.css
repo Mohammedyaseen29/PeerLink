@@ -2417,9 +2417,12 @@ body {
 .group-members-help, .group-members-selection { color: var(--fg-muted); font-size: 0.7rem; }
 .group-members-count { padding: 0.25rem 0.55rem; border: 1px solid var(--border); border-radius: var(--radius-pill); color: var(--fg-secondary); font-size: 0.7rem; white-space: nowrap; }
 .member-list { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: var(--spacing-sm); margin-top: var(--spacing-md); }
+.member-entry { min-width: 0; display: flex; align-items: stretch; gap: var(--spacing-xs); }
 .member-row { min-width: 0; display: flex; align-items: center; gap: var(--spacing-sm); padding: 0.65rem 0.75rem; border: 1px solid var(--border); border-radius: var(--radius-md); background: var(--bg-secondary); color: var(--fg); text-align: left; }
 .member-self { background: var(--bg-primary); }
 .member-choice { width: 100%; font: inherit; cursor: pointer; transition: border-color var(--transition-fast), background var(--transition-fast); }
+.member-entry .member-choice { width: auto; flex: 1; }
+.member-entry .room-status-retry { padding: 0.4rem 0.5rem; font-size: 0.68rem; }
 .member-choice:hover:not(:disabled) { border-color: var(--border-hover); background: var(--bg-elevated); }
 .member-choice:disabled { opacity: 0.58; cursor: wait; }
 .member-choice.selected { border-color: var(--success); background: rgba(110, 231, 183, 0.06); }
