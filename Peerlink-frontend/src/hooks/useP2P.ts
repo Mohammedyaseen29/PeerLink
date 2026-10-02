@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { clearRoom as clearRoomDB, clearTemporaryFiles, deleteFile as deleteStoredFile, getFilesInRoom, getUpdatePreviewUrl, readFileRange, streamFileToDownload, type FileMetadata } from '../ProgressDB';
 import { CHUNK_SIZE, TransferEngine } from '../transfer/TransferEngine';
 import type { QueuedFile, ConnectionType, ReceivingFile, ChatMessage, Settings, RoomType, PeerMember } from '../types';
-import { generateId } from '../utils/helpers';
+import { generateId, getFileMimeType } from '../utils/helpers';
 import { getRandomAvatar } from '../components/avatars';
 import { createRemotePreviewUrl, MAX_PREVIEW_RANGE_BYTES, RangeBroker, type PreviewRangeRequest, type PreviewRangeResponse, waitForPreviewServiceWorker } from '../preview/RangeBroker';
 
@@ -186,12 +186,18 @@ const ADJECTIVES = ['Swift', 'Cosmic', 'Neon', 'Shadow', 'Crystal', 'Thunder', '
 const NOUNS = ['Spidy', 'Foxy', 'Rexy', 'Wolf', 'Tiger', 'Eagle', 'Hawk', 'Fox', 'Bear', 'Lynx', 'Owl', 'Raven', 'Falcon', 'Dragon', 'Leopard', 'Panther', 'Lion'];
 function randomWord(words: string[]) { return words[Math.floor(Math.random() * words.length)]; }
 function generateRoomId() { return `peer-${crypto.randomUUID()}`; }
-function getUsername() {
-    try {
-        const saved = JSON.parse(localStorage.getItem(STORAGE_KEY) || 'null');
-        if (typeof saved?.username === 'string' && saved.username) return saved.username;
-    } catch { /* Keep identity generation usable when storage is unavailable. */ }
-    return `${randomWord(ADJECTIVES)}${randomWord(NOUNS)}`;
+function validUsername(value: unknown): string | null {
+    if (typeof value !== 'string') return null;
+    const name = value.trim();
+    return name.length >= 1 && name.length <= 64 && !/[\u0000-\u001f\u007f-\u009f]/.test(name) ? name : null;
+}
+function getUsername(saved: unknown) {
+    return validUsername(saved) || `${randomWord(ADJECTIVES)}${randomWord(NOUNS)}`;
+}
+function loadProfile() {
+    const settings = loadSettings();
+    const username = getUsername(settings.username);
+    return { username, settings: { ...settings, username } };
 }
 
 export function useP2P() {
@@ -213,8 +219,9 @@ export function useP2P() {
     const [currentReceiving, setCurrentReceiving] = useState<ReceivingFile | null>(null);
     const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]);
     const [unreadCount, setUnreadCount] = useState(0);
-    const [settings, setSettings] = useState<Settings>(loadSettings);
-    const [username] = useState(getUsername);
+    const [initialProfile] = useState(loadProfile);
+    const [settings, setSettings] = useState<Settings>(initialProfile.settings);
+    const [username, setUsername] = useState(initialProfile.username);
     const [isChatOpen, setIsChatOpen] = useState(false);
     const [isSettingsOpen, setIsSettingsOpen] = useState(false);
     const [toast, setToast] = useState<{ message: string; kind: 'success' | 'error' | 'info' } | null>(null);
@@ -246,6 +253,7 @@ export function useP2P() {
     const roomJoinGeneration = useRef(0);
     const temporary = useRef(false);
     const live = useRef(true);
+    const identityRef = useRef(username);
     const chatOpen = useRef(false);
     const seenChatMessages = useRef(new Set<string>());
     const options = useRef(settings);
@@ -256,6 +264,7 @@ export function useP2P() {
     const pendingRemoteRanges = useRef(new Map<string, PendingRemoteRange>());
     const previewBroker = useRef<RangeBroker | null>(null);
     options.current = settings;
+    identityRef.current = username;
     chatOpen.current = isChatOpen;
 
     // React may defer/replay updater callbacks. Keep protocol state outside them.
@@ -505,11 +514,11 @@ export function useP2P() {
         if (session.control?.readyState !== 'open') return;
         const sources = new Map<string, SharedSource>();
         for (const item of queue.current) {
-            if (!item.recipientIds.includes(session.peerId) || ['failed', 'paused'].includes(item.recipients.find(recipient => recipient.peerId === session.peerId)?.status || '')) continue;
+            if (!item.recipientIds.includes(session.peerId)) continue;
             const fileId = `q-${item.id}`;
             const totalChunks = Math.ceil(item.file.size / CHUNK_SIZE);
             sources.set(fileId, { file: item.file, metadata: { fileId, roomId: currentRoom.current, name: item.file.name.slice(0, 255),
-                path: item.file.webkitRelativePath.slice(0, 512) || undefined, size: item.file.size, mimeType: safeMimeType(item.file.type),
+                path: item.file.webkitRelativePath.slice(0, 512) || undefined, size: item.file.size, mimeType: safeMimeType(getFileMimeType(item.file)),
                 totalChunks, chunkSize: CHUNK_SIZE, receivedChunks: totalChunks, status: 'complete', createdAt: 0 } });
         }
         for (const metadata of receivedFilesRef.current) {
@@ -538,6 +547,33 @@ export function useP2P() {
         const all: FileMetadata[] = [];
         for (const session of sessions.current.values()) all.push(...session.remoteFilesByAlias.values());
         replaceOnlineFiles(all);
+    };
+    const applyPeerProfile = (peerId: string, username: unknown, avatar: unknown) => {
+        const member = roomMembers.current.get(peerId);
+        if (!member) return;
+        const name = validUsername(username) || member.username;
+        const nextAvatar = typeof avatar === 'string' && avatar.trim() ? avatar.trim().slice(0, 64) : undefined;
+        const existingSession = sessions.current.get(peerId);
+        if (member.username === name && member.avatar === nextAvatar &&
+            (!existingSession || (existingSession.username === name && existingSession.avatar === nextAvatar))) return;
+        const updated: PeerMember = { ...member, username: name, avatar: nextAvatar };
+        roomMembers.current.set(peerId, updated);
+        setMembers(current => current.map(item => item.peerId === peerId ? { ...item, username: name, avatar: nextAvatar } : item));
+
+        const session = existingSession;
+        if (session) {
+            session.username = name;
+            session.avatar = nextAvatar;
+            session.engine?.updateSourceName(name);
+            for (const [alias, metadata] of session.remoteFilesByAlias) {
+                session.remoteFilesByAlias.set(alias, { ...metadata, sourceName: name });
+            }
+            refreshGroupOnlineFiles();
+        }
+        changeQueue(items => items.map(item => ({ ...item, recipients: item.recipients.map(recipient => recipient.peerId === peerId
+            ? { ...recipient, peerName: name } : recipient) })));
+        setCurrentReceivings(current => current.map(item => item.peerId === peerId ? { ...item, peerName: name } : item));
+        setCurrentReceiving(current => current?.peerId === peerId ? { ...current, peerName: name } : current);
     };
     const updateMember = (session: PeerSession, status: PeerMember['status'], connection: ConnectionType = session.connectionType) => {
         session.status = status; session.connectionType = connection;
@@ -787,6 +823,7 @@ export function useP2P() {
         };
         const socket = new WebSocket(import.meta.env.VITE_SIGNALING_SERVER_URL); ws.current = socket;
         let joinedRoom = false;
+        let joinedProfileUpdated = false;
         let signaling = Promise.resolve();
         const offering = new Set<string>();
         const roomPeers = roomMembers.current;
@@ -948,8 +985,17 @@ export function useP2P() {
         }));
         const ensureSignaledSession = (peer: { peerId: string; username?: string; avatar?: string; supportsReconnect?: boolean }) => {
             if (typeof peer.peerId !== 'string' || !peer.peerId) return null;
-            const details: PeerMember = { peerId: peer.peerId, username: typeof peer.username === 'string' ? peer.username : 'Peer',
-                avatar: peer.avatar, supportsReconnect: peer.supportsReconnect === true, connectionType: 'disconnected', status: 'connecting' };
+            const existing = sessions.current.get(peer.peerId);
+            if (existing) {
+                applyPeerProfile(peer.peerId, peer.username, peer.avatar);
+                return existing;
+            }
+            const known = roomPeers.get(peer.peerId);
+            if (known) applyPeerProfile(peer.peerId, peer.username, peer.avatar);
+            const details: PeerMember = { peerId: peer.peerId, username: validUsername(peer.username) || known?.username || 'Peer',
+                avatar: typeof peer.avatar === 'string' ? peer.avatar : known?.avatar,
+                supportsReconnect: peer.supportsReconnect === true, connectionType: known?.connectionType ?? 'disconnected',
+                status: known?.status ?? 'connecting' };
             roomPeers.set(peer.peerId, details);
             const session = createPeerSession(details, undefined, onTransportLost, onTransportConnected);
             void beginOffer(session).catch(error => {
@@ -963,7 +1009,7 @@ export function useP2P() {
         const reconcileRoomPeers = (rawPeers: unknown[], authoritative: boolean) => {
             const peers = rawPeers.filter((value): value is { peerId: string; username?: string; avatar?: string; supportsReconnect?: boolean } =>
                 !!value && typeof value === 'object' && typeof (value as { peerId?: unknown }).peerId === 'string')
-                .map(peer => ({ peerId: peer.peerId, username: typeof peer.username === 'string' ? peer.username : 'Peer',
+                .map(peer => ({ peerId: peer.peerId, username: validUsername(peer.username) || 'Peer',
                     avatar: typeof peer.avatar === 'string' ? peer.avatar : undefined, supportsReconnect: peer.supportsReconnect === true }));
             const known = new Set(roomPeers.keys());
             if (authoritative) {
@@ -977,6 +1023,7 @@ export function useP2P() {
                 }
             }
             for (const peer of peers) {
+                if (roomPeers.has(peer.peerId)) applyPeerProfile(peer.peerId, peer.username, peer.avatar);
                 const session = sessions.current.get(peer.peerId);
                 const previous = roomPeers.get(peer.peerId);
                 roomPeers.set(peer.peerId, { ...peer, status: session?.status ?? previous?.status ?? 'connecting',
@@ -998,7 +1045,7 @@ export function useP2P() {
                     else if (newRoomType === 'persistent') void navigator.storage?.persist?.().catch(() => undefined);
                     if (!live.current || socket !== ws.current || currentRoom.current !== room) return;
                     if (newRoomType === 'temporary') replaceReceivedFiles([]);
-                    send({ type: 'join', protocolVersion: 2, roomId: room, roomType: newRoomType, username, avatar: options.current.avatar,
+                    send({ type: 'join', protocolVersion: 2, roomId: room, roomType: newRoomType, username: identityRef.current, avatar: options.current.avatar,
                         heartbeat: true, supportsReconnect: true });
                 } catch (error) { failSignaling(error instanceof Error ? error.message : String(error)); }
             })();
@@ -1053,9 +1100,31 @@ export function useP2P() {
                     showToast('A peer is using an older PeerLink version. Everyone must update or reload the app, leave the room, and rejoin.', 'info');
                     return;
                 }
+                if (msg.type === 'profile_error') {
+                    if (msg.roomId === room && msg.peerId === selfPeerIdRef.current) {
+                        showToast(typeof msg.message === 'string' ? msg.message : 'Unable to sync your profile with the room.');
+                    }
+                    return;
+                }
+                if (msg.type === 'profile_updated') {
+                    // The server acknowledgement is informational. The local desired identity stays authoritative.
+                    return;
+                }
+                if (msg.type === 'peer_updated' && msg.roomId === room && msg.peer && typeof msg.peer === 'object' && !Array.isArray(msg.peer)) {
+                    const peer = msg.peer as { peerId?: unknown; username?: unknown; avatar?: unknown };
+                    if (typeof peer.peerId === 'string' && peer.peerId !== selfPeerIdRef.current) {
+                        applyPeerProfile(peer.peerId, peer.username, peer.avatar);
+                    }
+                    return;
+                }
                 if (msg.type === 'joined') {
                     if (msg.protocolVersion !== 2 || typeof msg.peerId !== 'string' || !Array.isArray(msg.peers)) { failSignaling('The signaling server returned an incompatible room response.'); return; }
                     joinedRoom = true; selfPeerIdRef.current = msg.peerId; setSelfPeerId(msg.peerId);
+                    if (!joinedProfileUpdated) {
+                        joinedProfileUpdated = true;
+                        try { send({ type: 'profile_update', username: identityRef.current, avatar: options.current.avatar }); }
+                        catch { showToast('Your profile could not be synced to the room yet.', 'error'); }
+                    }
                     const confirmedType: RoomType = msg.roomType === 'temporary' ? 'temporary' : 'persistent';
                     temporary.current = confirmedType === 'temporary'; setRoomType(confirmedType); setInRoom(true);
                     if (confirmedType === 'temporary') {
@@ -1189,8 +1258,13 @@ export function useP2P() {
     const retryPeerConnection = useCallback((peerId: string) => retryPeerRef.current(peerId), []);
 
     const addFilesToQueue = async (files: File[]) => {
+        if (!files.length) return;
         const usedIds = new Set(queue.current.map(item => item.id));
-        const recipientIds = selectedPeerIdsRef.current.filter(peerId => roomMembers.current.has(peerId));
+        const recipientIds = [...roomMembers.current.keys()].slice(0, 1);
+        if (!recipientIds.length) {
+            showToast('Join a room with another person before adding files.');
+            return;
+        }
         const recipients = recipientIds.map(peerId => {
             const peer = sessions.current.get(peerId) || roomMembers.current.get(peerId)!;
             return { peerId, peerName: peer.username, status: 'pending' as const, progress: 0, bytesTransferred: 0 };
@@ -1291,7 +1365,7 @@ export function useP2P() {
     const sendChatMessage = (content: string) => {
         const targets = [...sessions.current.values()].filter(session => session.status === 'connected' && session.control?.readyState === 'open');
         if (!content.trim() || !targets.length) return;
-        const message: ChatMessage = { id: generateId(), senderId: selfPeerIdRef.current, senderName: username,
+        const message: ChatMessage = { id: generateId(), senderId: selfPeerIdRef.current, senderName: identityRef.current,
             content: content.trim(), timestamp: Date.now(), status: 'sent',
             recipientStatuses: targets.map(session => ({ peerId: session.peerId, peerName: session.username, status: 'sent' })) };
         for (const session of targets) session.control!.send(JSON.stringify({ type: 'chat', ...message }));
@@ -1299,9 +1373,41 @@ export function useP2P() {
     };
     const markChatRead = useCallback(() => setUnreadCount(0), []);
     useEffect(() => { if (isChatOpen) markChatRead(); }, [isChatOpen, markChatRead]);
-    const updateSettings = (changes: Partial<Settings>) => {
-        const updated = { ...options.current, ...changes };
-        setSettings(updated); localStorage.setItem(STORAGE_KEY, JSON.stringify(updated));
+    const updateSettings = (changes: Partial<Settings>): boolean => {
+        const hasUsername = Object.prototype.hasOwnProperty.call(changes, 'username');
+        const nextUsername = hasUsername ? validUsername(changes.username) : identityRef.current;
+        if (!nextUsername) {
+            showToast('Name must be 1–64 characters and cannot be blank or contain control characters.');
+            return false;
+        }
+        if (Object.prototype.hasOwnProperty.call(changes, 'avatar') &&
+            (typeof changes.avatar !== 'string' || !changes.avatar.trim() || changes.avatar.trim().length > 64)) {
+            showToast('Choose a valid avatar before saving.');
+            return false;
+        }
+
+        const nextAvatar = typeof changes.avatar === 'string' ? changes.avatar.trim() : options.current.avatar;
+        const updated: Settings = { ...options.current, ...changes, username: nextUsername, avatar: nextAvatar };
+        try {
+            localStorage.setItem(STORAGE_KEY, JSON.stringify(updated));
+        } catch (error) {
+            showToast(`Unable to save settings on this device: ${error instanceof Error ? error.message : String(error)}`);
+            return false;
+        }
+
+        const profileChanged = nextUsername !== identityRef.current || nextAvatar !== options.current.avatar;
+        identityRef.current = nextUsername;
+        options.current = updated;
+        setUsername(nextUsername);
+        setSettings(updated);
+        if (profileChanged) {
+            const socket = ws.current;
+            if (socket?.readyState === WebSocket.OPEN && selfPeerIdRef.current) {
+                try { socket.send(JSON.stringify({ type: 'profile_update', username: nextUsername, avatar: nextAvatar })); }
+                catch { showToast('Your profile was saved on this device but could not be synced to the room.'); }
+            }
+        }
+        return true;
     };
     const dismissToast = () => { clearTimeout(toastTimer.current); setToast(null); };
     const getTransferDiagnostics = async () => {

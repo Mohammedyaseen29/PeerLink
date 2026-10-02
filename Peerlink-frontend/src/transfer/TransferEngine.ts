@@ -1,4 +1,5 @@
 import { saveMetaData, saveChunks, deleteFile, type FileMetadata } from '../ProgressDB';
+import { getFileMimeType } from '../utils/helpers';
 
 export const CHUNK_SIZE = 64 * 1024 - 128;
 const HIGH = 2 * 1024 * 1024;
@@ -347,7 +348,7 @@ export class TransferEngine {
                 nextRead.catch(() => undefined);
             }
             this.message({ type: 'transfer_meta', version: 3, fileId: id, name: file.name, path: file.webkitRelativePath, sharedWithRoom,
-                mimeType: file.type, size: file.size, totalChunks, chunkSize: CHUNK_SIZE });
+                mimeType: getFileMimeType(file), size: file.size, totalChunks, chunkSize: CHUNK_SIZE });
             while (!out.ready) {
                 check();
                 const waitStarted = performance.now();
@@ -414,6 +415,9 @@ export class TransferEngine {
         clearTimeout(this.workerIdleTimer);
         this.workerIdleTimer = undefined;
         this.clearWorker();
+    }
+    updateSourceName(peerName: string) {
+        this.source.peerName = peerName;
     }
     pause(id: string) { if (this.outgoing?.id === id) this.outgoing.paused = true; }
     resume(id: string) { if (this.outgoing?.id === id) { this.outgoing.paused = false; this.wake(); } }

@@ -6,6 +6,7 @@ interface CircularProgressProps {
     strokeWidth?: number;
     className?: string;
     showPercentage?: boolean;
+    ariaLabel?: string;
     status?: 'sending' | 'receiving' | 'paused' | 'pending' | 'sent' | 'failed' ;
 }
 
@@ -15,6 +16,7 @@ export function CircularProgress({
     strokeWidth = 4,
     className = "",
     showPercentage = true,
+    ariaLabel = "Transfer progress",
     status = "sending",
 }:CircularProgressProps) {
     const margin = 4; 
@@ -31,13 +33,21 @@ export function CircularProgress({
         paused: "var(--progress-paused, #6b7280)",
         pending: "var(--progress-pending, #6366f1)",
         sent: "var(--progress-sent, #22c55e)",
+        failed: "var(--progress-failed, var(--danger, #fca5a5))",
     };
 
-    const isComplete = status === "sent" || progress === 100;
+    const boundedProgress = Math.max(0, Math.min(100, Math.round(progress)));
+    const isComplete = status === "sent";
 
     return (
         <div 
             className={`circular-progress ${className}`} 
+            role="progressbar"
+            aria-label={ariaLabel}
+            aria-valuemin={0}
+            aria-valuemax={100}
+            aria-valuenow={boundedProgress}
+            aria-valuetext={`${boundedProgress}% complete`}
             style={{ 
                 width: size, 
                 height: size, 

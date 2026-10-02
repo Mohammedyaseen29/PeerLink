@@ -73,6 +73,7 @@ export type ChatMessage = {
 export type Settings = {
     autoDownload: boolean;
     avatar: string;
+    username?: string;
 };
 
 export type P2PState = {
@@ -102,7 +103,7 @@ export type P2PActions = {
     openPreview: (file: FileMetadata) => Promise<string>;
     sendChatMessage: (content: string) => void;
     markChatRead: () => void;
-    updateSettings: (settings: Partial<Settings>) => void;
+    updateSettings: (settings: Partial<Settings>) => boolean;
     setChatOpen: (open: boolean) => void;
     setSettingsOpen: (open: boolean) => void;
 };

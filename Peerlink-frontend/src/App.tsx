@@ -13,6 +13,8 @@ import {
   SettingsModal,
 } from "./components";
 import { releasePreviewUrl, type FileMetadata } from "./ProgressDB";
+import { getFileMimeType } from "./utils/helpers";
+import type { QueuedFile } from "./types";
 import { CircleAlert, CircleCheck, Info, LoaderCircle, RefreshCw, WifiOff, X } from "lucide-react";
 
 function App() {
@@ -31,8 +33,6 @@ function App() {
     connectionFormKey,
     currentReceivings,
     members,
-    selectedPeerIds,
-    setSelectedPeerIds,
     selfPeerId,
     chatMessages,
     unreadCount,
@@ -140,12 +140,30 @@ function App() {
     }
   };
 
+  const handleQueuedPreview = (queuedFile: QueuedFile) => {
+    previewRequest.current++;
+    const { file, id } = queuedFile;
+    const mimeType = getFileMimeType(file);
+    const previewBlob = mimeType === file.type ? file : file.slice(0, file.size, mimeType);
+    const url = URL.createObjectURL(previewBlob);
+    setPreviewFile({
+      fileId: `q-${id}`,
+      roomId,
+      name: file.name,
+      path: (file as File & { webkitRelativePath?: string }).webkitRelativePath,
+      size: file.size,
+      mimeType,
+      totalChunks: queuedFile.totalChunks,
+      receivedChunks: queuedFile.totalChunks,
+      status: "complete",
+      createdAt: Date.now(),
+    });
+    setPreviewUrl(url);
+  };
+
   const handleClosePreview = () => {
     previewRequest.current++;
     if (previewFile) closePreview(previewFile.fileId);
-    if (previewUrl) {
-      void releasePreviewUrl(previewUrl);
-    }
     setPreviewFile(null);
     setPreviewUrl(null);
   };
@@ -161,11 +179,21 @@ function App() {
   }, [onlineFiles, previewFile, previewUrl, closePreview]);
 
   useEffect(() => {
-    if (previewFile && !onlineFiles.some(file => file.fileId === previewFile.fileId) &&
+    if (!previewFile) return;
+    if (previewFile.fileId.startsWith("q-")) {
+      const queuedId = previewFile.fileId.slice(2);
+      if (sendQueue.some((file) => file.id === queuedId)) return;
+      previewRequest.current++;
+      closePreview(previewFile.fileId);
+      setPreviewFile(null);
+      setPreviewUrl(null);
+      return;
+    }
+    if (!onlineFiles.some(file => file.fileId === previewFile.fileId) &&
         !receivedFiles.some(file => file.fileId === previewFile.fileId)) handleClosePreview();
   // Close a local preview if its stored file was deleted.
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [receivedFiles, onlineFiles]);
+  }, [receivedFiles, onlineFiles, sendQueue, previewFile]);
 
   return (
     <div className="app-container">
@@ -235,20 +263,17 @@ function App() {
             {signalingStatus !== "full" && (
               <GroupMembers
                 members={members}
-                selectedPeerIds={selectedPeerIds}
-                onSelectionChange={setSelectedPeerIds}
                 username={username}
                 avatar={settings.avatar}
                 selfOnline={signalingStatus !== "offline"}
                 onRetryPeer={retryPeerConnection}
-                maxPeers={2}
               />
             )}
 
             {signalingStatus !== "full" && (
               <FileUploader
                 onFilesSelect={handleFilesSelect}
-                disabled={!connected || selectedPeerIds.length === 0}
+                disabled={!connected}
               />
             )}
 
@@ -259,6 +284,7 @@ function App() {
                 onResume={resumeSending}
                 onRemove={removeFromQueue}
                 onClearAll={clearAllQueue}
+                onPreview={handleQueuedPreview}
               />
             )}
 
@@ -309,6 +335,7 @@ function App() {
           isOpen={isSettingsOpen}
           onClose={() => setIsSettingsOpen(false)}
           settings={settings}
+          username={username}
           avatar={settings.avatar}
           onUpdateSettings={updateSettings}
         />

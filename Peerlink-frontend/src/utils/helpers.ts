@@ -66,6 +66,54 @@ export const isPreviewable = (mimeType: string): boolean => {
     );
 };
 
+/** Prefer the browser's MIME type, and infer only common media/document types when it is missing. */
+export const getFileMimeType = (file: File): string => {
+    const actualMimeType = file.type.trim();
+    const actualMimeEssence = actualMimeType.split(";", 1)[0].trim().toLowerCase();
+    if (actualMimeEssence === "text/html" || actualMimeEssence === "application/xhtml+xml") return "text/plain";
+    if (actualMimeType) return actualMimeType;
+
+    const extension = file.name.split(".").pop()?.toLowerCase() ?? "";
+    const commonMimeTypes: Record<string, string> = {
+        avif: "image/avif",
+        bmp: "image/bmp",
+        gif: "image/gif",
+        heic: "image/heic",
+        heif: "image/heif",
+        jpe: "image/jpeg",
+        jpeg: "image/jpeg",
+        jpg: "image/jpeg",
+        png: "image/png",
+        webp: "image/webp",
+        svg: "text/plain",
+        ico: "image/x-icon",
+        mp4: "video/mp4",
+        m4v: "video/mp4",
+        mov: "video/quicktime",
+        ogv: "video/ogg",
+        webm: "video/webm",
+        aac: "audio/aac",
+        flac: "audio/flac",
+        m4a: "audio/mp4",
+        mp3: "audio/mpeg",
+        oga: "audio/ogg",
+        ogg: "audio/ogg",
+        wav: "audio/wav",
+        weba: "audio/webm",
+        pdf: "application/pdf",
+        csv: "text/csv",
+        json: "text/plain",
+        log: "text/plain",
+        md: "text/plain",
+        markdown: "text/plain",
+        txt: "text/plain",
+        htm: "text/plain",
+        html: "text/plain",
+    };
+
+    return commonMimeTypes[extension] ?? "application/octet-stream";
+};
+
 /**
  * Get file icon based on mime type
  */

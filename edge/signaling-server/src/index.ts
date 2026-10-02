@@ -100,6 +100,9 @@ export class SignalingRoom extends DurableObject {
         case "heartbeat":
           this.send(ws, { type: "heartbeat_ack", roomId: session.roomId, peerId: session.peerId });
           break;
+        case "profile_update":
+          this.updateProfile(ws, session, messageData);
+          break;
         case "sync":
           this.send(ws, {
             type: "room_state",
@@ -273,6 +276,48 @@ export class SignalingRoom extends DurableObject {
 
   private cleanUsername(value: unknown) {
     return typeof value === "string" && value.trim() ? value.trim().slice(0, 64) : "Anonymous";
+  }
+
+  private validProfileUsername(value: unknown) {
+    if (typeof value !== "string") return null;
+    const username = value.trim();
+    return username.length >= 1 && username.length <= 64 && !/[\u0000-\u001f\u007f-\u009f]/.test(username) ? username : null;
+  }
+
+  private updateProfile(ws: WebSocket, session: RoomSession, message: Record<string, unknown>) {
+    const hasUsername = Object.prototype.hasOwnProperty.call(message, "username");
+    const hasAvatar = Object.prototype.hasOwnProperty.call(message, "avatar");
+    if (!hasUsername && !hasAvatar) {
+      this.send(ws, { type: "profile_error", roomId: session.roomId, peerId: session.peerId,
+        code: "empty_profile", message: "Choose a name or avatar before syncing your profile." });
+      return;
+    }
+
+    const username = hasUsername ? this.validProfileUsername(message.username) : session.username;
+    if (!username) {
+      this.send(ws, { type: "profile_error", roomId: session.roomId, peerId: session.peerId,
+        code: "invalid_username", message: "Name must be 1–64 characters and cannot be blank or contain control characters." });
+      return;
+    }
+    if (hasAvatar && typeof message.avatar !== "string") {
+      this.send(ws, { type: "profile_error", roomId: session.roomId, peerId: session.peerId,
+        code: "invalid_avatar", message: "Choose a valid avatar before syncing your profile." });
+      return;
+    }
+    const avatar = hasAvatar
+      ? (typeof message.avatar === "string" && message.avatar.trim() ? message.avatar.trim().slice(0, 64) : undefined)
+      : session.avatar;
+    const updated: RoomSession = { ...session, username, ...(avatar ? { avatar } : { avatar: undefined }) };
+    try {
+      ws.serializeAttachment(updated);
+    } catch {
+      this.send(ws, { type: "profile_error", roomId: session.roomId, peerId: session.peerId,
+        code: "update_failed", message: "The room could not save your profile update." });
+      return;
+    }
+    if (!this.send(ws, { type: "profile_updated", roomId: updated.roomId, peerId: updated.peerId,
+      peer: this.publicPeer(updated) })) return;
+    this.broadcastToRoom(updated.roomId, { type: "peer_updated", roomId: updated.roomId, peer: this.publicPeer(updated) }, ws);
   }
 
   private joinedMessage(session: RoomSession) {

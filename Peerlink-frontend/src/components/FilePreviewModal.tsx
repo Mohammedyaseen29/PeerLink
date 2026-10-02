@@ -57,7 +57,8 @@ export function FilePreviewModal({
                                 <iframe
                                     src={previewUrl}
                                     className="preview-iframe preview-text"
-                                    title="Text Preview"
+                                    title={`Text preview for ${file.name}`}
+                                    sandbox=""
                                 />
                             )}
                         </>
