@@ -3,7 +3,7 @@ import { getFileMimeType } from '../utils/helpers';
 
 export const CHUNK_SIZE = 64 * 1024 - 128;
 const HIGH = 2 * 1024 * 1024;
-const LOW = HIGH - 2 * CHUNK_SIZE;
+const LOW = 1 * 1024 * 1024;
 const WINDOW = 128; // At most 8 MiB sent but not committed, including SCTP queues.
 const INITIAL_READ_BATCH = 16;
 const READ_BATCH = 32;
@@ -171,7 +171,7 @@ export class TransferEngine {
             incoming.flushRequested = true;
             if (incoming.writing) this.prepareNextBatch(incoming);
             else void this.flush(incoming);
-        }, 32);
+        }, 128);
     }
 
     private validateBatch(batch: Packet[]): Promise<void> {
@@ -258,7 +258,7 @@ export class TransferEngine {
                     ...incoming.meta, receivedChunks: committed, status: completesFile ? 'complete' : 'receiving',
                 });
                 // Start at most one following batch's digest while this transaction commits.
-                // Partial batches still wait for the 32 ms coalescing timer.
+                // Partial batches still wait for the 128 ms coalescing timer.
                 this.prepareNextBatch(incoming);
                 this.scheduleFlush(incoming);
                 try { await storageCommit; }
