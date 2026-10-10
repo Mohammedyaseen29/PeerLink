@@ -236,12 +236,19 @@ export function useP2P() {
     const transferEngines = useRef(new Set<TransferEngine>());
     const aggregateMetrics = useRef({ peakBufferedBytes: 0, peakReceiveBytes: 0, receivedBytes: 0, sentBytes: 0,
         activeWorkers: 0, workerStarts: 0, pendingReads: 0, disposed: true, readAwaitMs: 0, readyWaitMs: 0,
-        channelWaitMs: 0, creditWaitMs: 0, pausedWaitMs: 0, hashMs: 0, storageMs: 0, storedBatches: 0, storedChunks: 0 });
+        channelWaitMs: 0, creditWaitMs: 0, pausedWaitMs: 0, hashMs: 0, storageMs: 0, storedBatches: 0, storedChunks: 0,
+        bufferedLowEvents: 0, eventWaitWakes: 0, fallbackWaitWakes: 0, channelWaits: 0, channelFallbackWakes: 0,
+        bufferedLowWakeCount: 0, bufferedLowWakeBytes: 0, bufferedLowWakeEmptyCount: 0,
+        creditWaits: 0, creditFallbackWakes: 0, receiveTimerFlushes: 0, receiveTimerFlushedChunks: 0,
+        sendOperationErrors: 0, sendRetryWaitMs: 0 });
     const syncAggregateMetrics = () => {
         const values = [...transferEngines.current].map(transport => transport.metrics);
         const maxKeys = ['peakBufferedBytes', 'peakReceiveBytes'] as const;
         const sumKeys = ['receivedBytes', 'sentBytes', 'activeWorkers', 'workerStarts', 'pendingReads', 'readAwaitMs', 'readyWaitMs',
-            'channelWaitMs', 'creditWaitMs', 'pausedWaitMs', 'hashMs', 'storageMs', 'storedBatches', 'storedChunks'] as const;
+            'channelWaitMs', 'creditWaitMs', 'pausedWaitMs', 'hashMs', 'storageMs', 'storedBatches', 'storedChunks',
+            'bufferedLowEvents', 'eventWaitWakes', 'fallbackWaitWakes', 'channelWaits', 'channelFallbackWakes', 'creditWaits', 'creditFallbackWakes',
+            'bufferedLowWakeCount', 'bufferedLowWakeBytes', 'bufferedLowWakeEmptyCount',
+            'receiveTimerFlushes', 'receiveTimerFlushedChunks', 'sendOperationErrors', 'sendRetryWaitMs'] as const;
         for (const key of maxKeys) aggregateMetrics.current[key] = values.reduce((max, value) => Math.max(max, value[key]), 0);
         for (const key of sumKeys) aggregateMetrics.current[key] = values.reduce((sum, value) => sum + value[key], 0);
         aggregateMetrics.current.disposed = values.every(value => value.disposed);
@@ -1430,8 +1437,10 @@ export function useP2P() {
     };
     const dismissToast = () => { clearTimeout(toastTimer.current); setToast(null); };
     const getTransferDiagnostics = async () => {
-        const peer = [...sessions.current.values()].find(session => session.pc)?.pc;
+        const session = [...sessions.current.values()].find(item => item.pc);
+        const peer = session?.pc;
         let selectedCandidatePair: Record<string, string | number | null> | null = null;
+        const dataChannels: Array<Record<string, string | number | null>> | null = peer ? [] : null;
         if (peer) {
             const stats = await peer.getStats();
             let pairId: string | undefined;
@@ -1439,8 +1448,25 @@ export function useP2P() {
                 if (report.type === 'transport' && typeof report.selectedCandidatePairId === 'string') {
                     pairId = report.selectedCandidatePairId;
                 }
+                if (report.type === 'data-channel') {
+                    const channel = report as RTCStats & {
+                        label?: string; dataChannelIdentifier?: number; state?: string;
+                        messagesSent?: number; bytesSent?: number; messagesReceived?: number; bytesReceived?: number;
+                    };
+                    dataChannels!.push({
+                        label: typeof channel.label === 'string' ? channel.label : null,
+                        dataChannelIdentifier: typeof channel.dataChannelIdentifier === 'number' ? channel.dataChannelIdentifier : null,
+                        state: typeof channel.state === 'string' ? channel.state : null,
+                        messagesSent: typeof channel.messagesSent === 'number' ? channel.messagesSent : null,
+                        bytesSent: typeof channel.bytesSent === 'number' ? channel.bytesSent : null,
+                        messagesReceived: typeof channel.messagesReceived === 'number' ? channel.messagesReceived : null,
+                        bytesReceived: typeof channel.bytesReceived === 'number' ? channel.bytesReceived : null,
+                        timestamp: typeof channel.timestamp === 'number' ? channel.timestamp : null,
+                    });
+                }
             });
             let pair = pairId ? stats.get(pairId) : undefined;
+            let selectionSource: 'transport' | 'nominated-fallback' = pair ? 'transport' : 'nominated-fallback';
             if (!pair) {
                 stats.forEach(report => {
                     if (!pair && report.type === 'candidate-pair' && report.state === 'succeeded' && report.nominated) pair = report;
@@ -1450,22 +1476,33 @@ export function useP2P() {
                 const p = pair as RTCStats & {
                     localCandidateId?: string; remoteCandidateId?: string;
                     currentRoundTripTime?: number; bytesSent?: number; bytesReceived?: number;
+                    packetsSent?: number; packetsReceived?: number; packetsDiscardedOnSend?: number; bytesDiscardedOnSend?: number;
                 };
                 const local = p.localCandidateId ? stats.get(p.localCandidateId) as (RTCStats & { candidateType?: string; protocol?: string }) : undefined;
                 const remote = p.remoteCandidateId ? stats.get(p.remoteCandidateId) as (RTCStats & { candidateType?: string; protocol?: string }) : undefined;
+                // Candidate-pair RTT is measured by ICE/STUN checks; discard counters are socket handoff errors, not SCTP loss counters.
                 selectedCandidatePair = {
+                    selectionSource,
                     localCandidateType: local?.candidateType ?? null,
                     remoteCandidateType: remote?.candidateType ?? null,
                     localProtocol: local?.protocol ?? null,
                     remoteProtocol: remote?.protocol ?? null,
-                    currentRoundTripTime: p.currentRoundTripTime ?? null,
-                    bytesSent: p.bytesSent ?? null,
-                    bytesReceived: p.bytesReceived ?? null,
+                    currentRoundTripTime: typeof p.currentRoundTripTime === 'number' ? p.currentRoundTripTime : null,
+                    bytesSent: typeof p.bytesSent === 'number' ? p.bytesSent : null,
+                    bytesReceived: typeof p.bytesReceived === 'number' ? p.bytesReceived : null,
+                    packetsSent: typeof p.packetsSent === 'number' ? p.packetsSent : null,
+                    packetsReceived: typeof p.packetsReceived === 'number' ? p.packetsReceived : null,
+                    packetsDiscardedOnSend: typeof p.packetsDiscardedOnSend === 'number' ? p.packetsDiscardedOnSend : null,
+                    bytesDiscardedOnSend: typeof p.bytesDiscardedOnSend === 'number' ? p.bytesDiscardedOnSend : null,
+                    timestamp: typeof p.timestamp === 'number' ? p.timestamp : null,
                 };
             }
         }
         return {
+            peerId: session?.peerId ?? null,
+            transferMetrics: { ...syncAggregateMetrics() },
             selectedCandidatePair,
+            dataChannels,
             sctpMaxMessageSize: peer?.sctp?.maxMessageSize ?? null,
             visibilityState: document.visibilityState,
         };

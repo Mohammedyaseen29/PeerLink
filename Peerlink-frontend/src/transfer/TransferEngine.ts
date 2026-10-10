@@ -12,7 +12,7 @@ const READ_BATCH = 32;
 const RECEIVE_BATCH = 32;
 const encoder = new TextDecoder();
 type Packet = { chunkIndex: number; data: ArrayBuffer; hash: Uint8Array };
-type PendingBatch = { packets: Packet[]; validation: Promise<void> };
+type PendingBatch = { packets: Packet[]; validation: Promise<void>; timerFlush: boolean };
 type Incoming = { meta: FileMetadata; wireId: string; next: number; committed: number; queue: Packet[]; writing: boolean; committing: boolean; cancelled: boolean; flushRequested: boolean; pendingBatch?: PendingBatch; timer?: number };
 type Outgoing = { id: string; file: File; next: number; committed: number; ready: boolean; paused: boolean; done: boolean; error?: Error; progress: (bytes: number) => void; lastUpdate: number };
 export type TransferEvents = {
@@ -36,6 +36,11 @@ export class TransferEngine {
         activeWorkers: 0, workerStarts: 0, pendingReads: 0, disposed: false,
         readAwaitMs: 0, readyWaitMs: 0, channelWaitMs: 0, creditWaitMs: 0, pausedWaitMs: 0,
         hashMs: 0, storageMs: 0, storedBatches: 0, storedChunks: 0,
+        bufferedLowEvents: 0, eventWaitWakes: 0, fallbackWaitWakes: 0,
+        channelWaits: 0, channelFallbackWakes: 0, creditWaits: 0, creditFallbackWakes: 0,
+        bufferedLowWakeCount: 0, bufferedLowWakeBytes: 0, bufferedLowWakeEmptyCount: 0,
+        receiveTimerFlushes: 0, receiveTimerFlushedChunks: 0,
+        sendOperationErrors: 0, sendRetryWaitMs: 0,
     };
 
     private data: RTCDataChannel;
@@ -50,25 +55,34 @@ export class TransferEngine {
         this.data = data; this.control = control; this.room = room; this.events = events; this.roomType = roomType; this.source = source;
         data.binaryType = 'arraybuffer';
         data.bufferedAmountLowThreshold = LOW;
-        data.addEventListener('bufferedamountlow', this.wake);
+        data.addEventListener('bufferedamountlow', this.onBufferedAmountLow);
         data.addEventListener('message', this.onData);
         data.addEventListener('close', this.onClose);
         control.addEventListener('close', this.onClose);
     }
 
     private wake = () => { for (const fn of [...this.waiters]) fn(); };
+    private onBufferedAmountLow = () => {
+        this.metrics.bufferedLowEvents++;
+        this.wake();
+    };
     private onClose = () => this.dispose();
     private message(value: object) {
         if (this.control.readyState !== 'open') throw new Error('Connection closed');
         this.control.send(JSON.stringify(value));
     }
-    private async wait(timeout = 100) {
+    private async wait(timeout = 100): Promise<boolean> {
         if (this.disposed) throw new Error('Connection closed');
+        let wokeByEvent = false;
         await new Promise<void>(resolve => {
-            const done = () => { clearTimeout(timer); this.waiters.delete(done); resolve(); };
+            const done = () => { clearTimeout(timer); this.waiters.delete(onWake); resolve(); };
+            const onWake = () => { wokeByEvent = true; done(); };
             const timer = window.setTimeout(done, timeout);
-            this.waiters.add(done);
+            this.waiters.add(onWake);
         });
+        if (wokeByEvent) this.metrics.eventWaitWakes++;
+        else this.metrics.fallbackWaitWakes++;
+        return wokeByEvent;
     }
 
     handle(message: Record<string, unknown>): boolean {
@@ -190,6 +204,7 @@ export class TransferEngine {
         const final = incoming.next === incoming.meta.totalChunks;
         if (!full && !final && !incoming.flushRequested) return;
 
+        const timerFlush = !full && !final && incoming.flushRequested;
         clearTimeout(incoming.timer);
         incoming.timer = undefined;
         incoming.flushRequested = false;
@@ -198,7 +213,7 @@ export class TransferEngine {
         // A speculative digest can reject while IndexedDB is committing the prior batch.
         // Mark it handled now; the ordered writer still awaits it before saving.
         void validation.catch(() => undefined);
-        incoming.pendingBatch = { packets, validation };
+        incoming.pendingBatch = { packets, validation, timerFlush };
     }
 
     private failIncoming(error: Error) {
@@ -237,18 +252,24 @@ export class TransferEngine {
             while ((incoming.pendingBatch || incoming.queue.length) && !incoming.cancelled && !this.disposed) {
                 let batch: Packet[];
                 let validation: Promise<void>;
+                let timerFlush = false;
                 if (incoming.pendingBatch) {
-                    ({ packets: batch, validation } = incoming.pendingBatch);
+                    ({ packets: batch, validation, timerFlush } = incoming.pendingBatch);
                     incoming.pendingBatch = undefined;
                 } else {
                     const full = incoming.queue.length >= RECEIVE_BATCH;
                     const final = incoming.next === incoming.meta.totalChunks;
                     if (!full && !final && !incoming.flushRequested) break;
+                    timerFlush = !full && !final && incoming.flushRequested;
                     clearTimeout(incoming.timer);
                     incoming.timer = undefined;
                     incoming.flushRequested = false;
                     batch = incoming.queue.splice(0, RECEIVE_BATCH);
                     validation = this.validateBatch(batch);
+                }
+                if (timerFlush) {
+                    this.metrics.receiveTimerFlushes++;
+                    this.metrics.receiveTimerFlushedChunks += batch.length;
                 }
                 await validation;
                 if (incoming.cancelled || this.disposed) return;
@@ -375,20 +396,41 @@ export class TransferEngine {
                             const paused = out.paused;
                             const creditBlocked = out.next - out.committed >= WINDOW;
                             const channelBlocked = this.data.bufferedAmount + packet.byteLength > HIGH;
+                            const lowEventsBeforeWait = this.metrics.bufferedLowEvents;
                             const waitStarted = performance.now();
-                            try { await this.wait(); }
+                            let wokeByEvent = false;
+                            try { wokeByEvent = await this.wait(); }
                             finally {
                                 const waited = performance.now() - waitStarted;
                                 if (paused) this.metrics.pausedWaitMs += waited;
-                                if (creditBlocked) this.metrics.creditWaitMs += waited;
-                                if (channelBlocked) this.metrics.channelWaitMs += waited;
+                                if (creditBlocked) {
+                                    this.metrics.creditWaitMs += waited;
+                                    this.metrics.creditWaits++;
+                                    if (!wokeByEvent) this.metrics.creditFallbackWakes++;
+                                }
+                                if (channelBlocked) {
+                                    this.metrics.channelWaitMs += waited;
+                                    this.metrics.channelWaits++;
+                                    if (!wokeByEvent) this.metrics.channelFallbackWakes++;
+                                    else if (this.metrics.bufferedLowEvents > lowEventsBeforeWait) {
+                                        const bufferedBytes = this.data.bufferedAmount;
+                                        this.metrics.bufferedLowWakeCount++;
+                                        this.metrics.bufferedLowWakeBytes += bufferedBytes;
+                                        if (bufferedBytes === 0) this.metrics.bufferedLowWakeEmptyCount++;
+                                    }
+                                }
                             }
                         }
                         check();
                         try { this.data.send(packet); break; }
                         catch (error) {
-                            if (!(error instanceof DOMException) || error.name !== 'OperationError' || attempts >= 20) throw error;
-                            await this.wait(8); check();
+                            if (!(error instanceof DOMException) || error.name !== 'OperationError') throw error;
+                            this.metrics.sendOperationErrors++;
+                            if (attempts >= 20) throw error;
+                            const retryWaitStarted = performance.now();
+                            try { await this.wait(8); }
+                            finally { this.metrics.sendRetryWaitMs += performance.now() - retryWaitStarted; }
+                            check();
                         }
                     }
                     out.next++;
@@ -442,7 +484,7 @@ export class TransferEngine {
             this.incoming.flushRequested = false;
         }
         this.clearWorker(); this.wake();
-        this.data.removeEventListener('bufferedamountlow', this.wake);
+        this.data.removeEventListener('bufferedamountlow', this.onBufferedAmountLow);
         this.data.removeEventListener('message', this.onData);
         this.data.removeEventListener('close', this.onClose);
         this.control.removeEventListener('close', this.onClose);

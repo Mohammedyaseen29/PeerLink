@@ -66,3 +66,11 @@ In this single pair, the 256 KiB candidate measured about 21% higher mean throug
 Reload both peers: this is protocol version 3 and is not wire-compatible with older tabs. Manual pause/resume continues the same live transfer. Failed transfers are retried from the beginning with a new identifier; cross-reload partial-file recovery is not implemented by this engine.
 
 Queue counters are not a heap profiler. These checks are not a guarantee against every memory leak, browser crash, or regression. Multi-device/WAN/TURN performance, low-memory devices, browser storage exhaustion, long-duration stress, and native save-dialog workflows still require separate validation. Native WebRTC sending remains on the main thread for compatibility; file reading and packet hashing run in a worker.
+
+## Raw transport profile
+
+Run `node tests/webrtc-transport-profile.cjs` from the frontend directory. It measures raw ordered/reliable WebRTC DataChannel throughput between two independently launched browser processes, with an 8 MiB warm-up and 16 MiB measured run by default. START/READY/END/ACK messages share the ordered channel, use unique run IDs, and require exact receiver byte counts. Each send rechecks the high-water bound. Output includes receiver interval rates and the transport-selected ICE candidate pair.
+
+Configure `PLAYWRIGHT_MODULE` and `PEERLINK_CHROME`. Optional `PEERLINK_PROFILE_WARM_MIB`, `PEERLINK_PROFILE_MEASURE_MIB`, `PEERLINK_PROFILE_CHUNK_BYTES`, `PEERLINK_PROFILE_HIGH_WATER_BYTES`, `PEERLINK_PROFILE_LOW_WATER_BYTES`, and `PEERLINK_PROFILE_DEADLINE_MS` configure the profile.
+
+This bypasses the app, signaling service, hashing, and IndexedDB. Compare it with the full-engine test before attributing a limit to application code. See the [October 10 investigation](../docs/webrtc-throughput-investigation.md) for verified results and rejected evidence.
