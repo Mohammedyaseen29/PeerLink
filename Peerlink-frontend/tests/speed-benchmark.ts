@@ -1,4 +1,4 @@
-import { TransferEngine } from '../src/transfer/TransferEngine';
+import { SEND_BUFFER_HIGH_WATER, TransferEngine } from '../src/transfer/TransferEngine';
 import { getMetaData, getChunkIndices, readFileRange, deleteFile } from '../src/ProgressDB';
 
 const output = document.querySelector<HTMLPreElement>('#output')!;
@@ -7,9 +7,9 @@ const rawBtn = document.querySelector<HTMLButtonElement>('#raw')!;
 const lifecycleBtn = document.querySelector<HTMLButtonElement>('#lifecycle')!;
 const params = new URLSearchParams(location.search);
 const sizeMiB = Number(params.get('mib') ?? '32');
-const sendBufferLimitMiB = Number(params.get('bufferMiB') ?? '2');
 const SIZE = Math.max(1, Number.isFinite(sizeMiB) ? sizeMiB : 32) * 1024 * 1024 + 123;
-const SEND_BUFFER_LIMIT = Math.max(1, Number.isFinite(sendBufferLimitMiB) ? sendBufferLimitMiB : 2) * 1024 * 1024;
+const SEND_BUFFER_LIMIT = SEND_BUFFER_HIGH_WATER;
+const sendBufferLimitMiB = SEND_BUFFER_LIMIT / (1024 * 1024);
 let benchmarkBusy = false;
 function launch(active: HTMLButtonElement, run: () => Promise<void>) {
   if (benchmarkBusy) return;
@@ -86,7 +86,7 @@ async function runEngine() {
     const integrity = await verify(storedId);
     const workerCleanup = sender.metrics.activeWorkers === 0 && sender.metrics.pendingReads === 0;
     const boundedReceive = receiver.metrics.peakReceiveBytes <= 8 * 1024 * 1024;
-    const boundedSend = sender.metrics.peakBufferedBytes <= SEND_BUFFER_LIMIT + 256 * 1024;
+    const boundedSend = sender.metrics.peakBufferedBytes <= SEND_BUFFER_LIMIT;
     log({ result: 'complete', sizeBytes: SIZE, sizeMiBPlus123: sizeMiB, sendBufferLimitMiB, elapsedSeconds: +elapsed.toFixed(2), meanMiBps: +(SIZE/1048576/elapsed).toFixed(2), maxMessageSize: pairs.maxMessageSize, integrity,
       workerCleanup, boundedReceive, boundedSend, passed: workerCleanup && boundedReceive && boundedSend && integrity.allStoredBytesCompared,
       sender: sender.metrics, receiver: receiver.metrics, userAgent: navigator.userAgent, memory: (performance as unknown as { memory?: { usedJSHeapSize: number; jsHeapSizeLimit: number } }).memory ?? null });

@@ -18,7 +18,7 @@ const PREVIEW_REQUEST_TIMEOUT_MS = 22_000;
 const PREVIEW_BUFFER_HIGH_WATER = 512 * 1024;
 const SIGNALING_HEARTBEAT_INTERVAL_MS = 25_000;
 const RECONNECT_DELAYS_MS = [1_000, 5_000, 15_000] as const;
-const RECONNECT_NEGOTIATION_TIMEOUT_MS = 25_000;
+const NEGOTIATION_TIMEOUT_MS = 25_000;
 const previewFrameEncoder = new TextEncoder();
 const previewFrameDecoder = new TextDecoder();
 const MIME_TYPE_PATTERN = /^[\w!#$&^_.+-]+\/[\w!#$&^_.+-]+(?:\s*;\s*[\w!#$&^_.+-]+=(?:"[^"\r\n]*"|[\w!#$&^_.+-]+))*$/;
@@ -73,6 +73,7 @@ type PeerSession = {
     candidates: RTCIceCandidateInit[];
     status: PeerMember['status'];
     connectionType: ConnectionType;
+    initialNegotiationTimer?: number;
     outgoingCatalogRevision: number;
     incomingCatalogRevision: number;
     incomingCatalog: CatalogSnapshot | null;
@@ -683,6 +684,10 @@ export function useP2P() {
         previews.binaryType = 'arraybuffer'; previews.bufferedAmountLowThreshold = PREVIEW_BUFFER_HIGH_WATER / 2;
         const closeSession = (retry = true) => {
             if (sessions.current.get(session.peerId) !== session) return;
+            if (session.initialNegotiationTimer !== undefined) {
+                window.clearTimeout(session.initialNegotiationTimer);
+                session.initialNegotiationTimer = undefined;
+            }
             for (const [id, pending] of pendingRemoteRanges.current) if (pending.peerId === session.peerId) settleRemoteRange(id, null, new Error('Peer disconnected.'), false);
             for (const controller of session.pendingHostRanges.values()) controller.abort('Peer disconnected');
             session.pendingHostRanges.clear();
@@ -713,6 +718,16 @@ export function useP2P() {
             if (retry) onTransportLost?.(session);
         };
         session.dispose = (retry = true) => closeSession(retry);
+        if (!linkId) {
+            session.initialNegotiationTimer = window.setTimeout(() => {
+                session.initialNegotiationTimer = undefined;
+                if (sessions.current.get(session.peerId) !== session || session.status === 'connected' || peer.remoteDescription) return;
+                showToast(session.supportsReconnect
+                    ? `Signaling with ${session.username} timed out. Retrying the negotiation.`
+                    : `Signaling with ${session.username} timed out. Retry the room connection.`, 'info');
+                session.dispose?.(true);
+            }, NEGOTIATION_TIMEOUT_MS);
+        }
         previews.onmessage = event => {
             const decoded = decodePreviewFrame(event.data); if (!decoded) return;
             const frame = decoded.header; const pending = pendingRemoteRanges.current.get(frame.requestId);
@@ -746,6 +761,10 @@ export function useP2P() {
         transferEngines.current.add(session.engine);
         const opened = () => {
             if (sessions.current.get(session.peerId) !== session || commands.readyState !== 'open' || chunks.readyState !== 'open') return;
+            if (session.initialNegotiationTimer !== undefined) {
+                window.clearTimeout(session.initialNegotiationTimer);
+                session.initialNegotiationTimer = undefined;
+            }
             onTransportConnected?.(session);
             updateMember(session, 'connected', 'p2p'); setSignalingStatus('negotiating');
             publishSessionCatalog(session); scheduleRecipientTransfers();
@@ -956,7 +975,7 @@ export function useP2P() {
                             state.inFlight = false;
                             session.dispose?.(true);
                         }
-                    }, RECONNECT_NEGOTIATION_TIMEOUT_MS);
+                    }, NEGOTIATION_TIMEOUT_MS);
                 } catch {
                     state.inFlight = false;
                     session.dispose?.(true);
@@ -1204,7 +1223,7 @@ export function useP2P() {
                         if (sessions.current.get(msg.fromPeerId as string) === next && next.status !== 'connected') {
                             state.inFlight = false; next.dispose?.(true);
                         }
-                    }, RECONNECT_NEGOTIATION_TIMEOUT_MS);
+                    }, NEGOTIATION_TIMEOUT_MS);
                     return;
                 }
                 if (msg.type === 'offer' || msg.type === 'answer' || msg.type === 'ice_candidate') {

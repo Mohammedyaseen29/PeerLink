@@ -2,8 +2,10 @@ import { saveMetaData, saveChunks, deleteFile, type FileMetadata } from '../Prog
 import { getFileMimeType } from '../utils/helpers';
 
 export const CHUNK_SIZE = 64 * 1024 - 128;
-const HIGH = 2 * 1024 * 1024;
-const LOW = 1 * 1024 * 1024;
+// Raw loopback trials favored a smaller native queue over 2 MiB; 256 KiB kept more headroom than 128 KiB.
+export const SEND_BUFFER_HIGH_WATER = 256 * 1024;
+const HIGH = SEND_BUFFER_HIGH_WATER;
+const LOW = HIGH / 2;
 const WINDOW = 128; // At most 8 MiB sent but not committed, including SCTP queues.
 const INITIAL_READ_BATCH = 16;
 const READ_BATCH = 32;

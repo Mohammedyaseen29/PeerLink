@@ -4,6 +4,8 @@ PeerLink transfers files directly between browser peers. Rooms support two membe
 
 The signaling Worker exchanges room membership, SDP, and ICE messages. It does not relay file contents. WebRTC may use the configured TURN server when a direct network path is unavailable. Files and their catalog entries are shared with the connected peer.
 
+The initial SDP exchange has a 25-second deadline while waiting for the remote description. If the peer advertises reconnect support, the client then uses bounded retries after 1, 5, and 15 seconds; each reconnect attempt has its own 25-second timeout. After a remote description arrives, WebRTC connection-state failure handling covers ICE connectivity.
+
 Persistent rooms keep received copies in that browser's IndexedDB so they can be reopened later. Temporary room copies are removed when the user leaves. Storage belongs to each device; it is not shared across members.
 
 ## File previews
@@ -14,6 +16,6 @@ Previewable files in the send queue use a browser object URL for the selected `F
 
 Transfers use approximately 64 KiB chunks. The sender reads an initial 16-chunk batch, then reads batches of up to 32 chunks (about 2 MiB) while sending the current batch. The receiver checks each chunk's SHA-256 hash and saves up to 32 ordered chunks in one IndexedDB transaction. While that transaction commits, it can hash one following batch. Progress and sender credit advance only after the transaction completes. Partial receive batches coalesce for up to 128 ms.
 
-Sender credit caps sent-but-uncommitted data at 128 chunks (about 8 MiB), and the receiver accepts at most 128 uncommitted chunks (about 8 MiB), including the active batch, a batch being checked, and queued chunks. Sender read staging is separate: the current and prefetched batches together hold up to about 4 MiB after startup. The data channel pauses sending above a 2 MiB high-water mark and wakes the sender when buffered data drops below the 1 MiB low-water threshold. Actual speed depends on the browser, local storage, CPU, and network path; these settings reduce avoidable per-batch waiting but do not promise a particular throughput.
+Sender credit caps sent-but-uncommitted data at 128 chunks (about 8 MiB), and the receiver accepts at most 128 uncommitted chunks (about 8 MiB), including the active batch, a batch being checked, and queued chunks. Sender read staging is separate: the current and prefetched batches together hold up to about 4 MiB after startup. The data channel pauses sending above a 256 KiB high-water mark and wakes the sender when buffered data drops below the 128 KiB low-water threshold. Actual speed depends on the browser, local storage, CPU, and network path; these settings reduce avoidable per-batch waiting but do not promise a particular throughput.
 
 After it queues a batch's chunk and metadata writes, `saveChunks` feature-detects [`IDBTransaction.commit()`](https://w3c.github.io/IndexedDB/#dom-idbtransaction-commit); browsers without that method use IndexedDB's automatic commit. The receiver still acknowledges progress only after the transaction's complete event. The sender's low-water wakeup uses the WebRTC [`bufferedAmountLowThreshold`](https://www.w3.org/TR/webrtc/#dom-rtcdatachannel-bufferedamountlowthreshold).
