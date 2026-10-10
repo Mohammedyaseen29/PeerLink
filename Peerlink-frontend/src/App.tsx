@@ -15,6 +15,7 @@ import {
 import { releasePreviewUrl, type FileMetadata } from "./ProgressDB";
 import { getFileMimeType } from "./utils/helpers";
 import type { QueuedFile } from "./types";
+import { registerPeerLinkServiceWorker } from "./serviceWorker";
 import { CircleAlert, CircleCheck, Info, LoaderCircle, RefreshCw, WifiOff, X } from "lucide-react";
 
 function App() {
@@ -97,9 +98,7 @@ function App() {
     };
     navigator.serviceWorker.addEventListener('controllerchange', onControllerChange);
     window.addEventListener('focus', onWindowFocus);
-    const workerPath = import.meta.env.DEV ? '/dev-sw.js?dev-sw' : '/sw.js';
-    const workerType: WorkerType = import.meta.env.DEV ? 'module' : 'classic';
-    void navigator.serviceWorker.register(workerPath, { scope: '/', type: workerType }).then(value => {
+    void registerPeerLinkServiceWorker().then(value => {
       if (disposed) return;
       registration = value;
       serviceWorkerRegistration.current = value;

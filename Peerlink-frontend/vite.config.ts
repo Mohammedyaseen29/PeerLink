@@ -15,7 +15,8 @@ export default defineConfig({
       registerType: 'prompt',
       devOptions: {
         enabled: true,
-        type: 'module'
+        type: 'module',
+        navigateFallback: 'index.html'
       },
       includeAssets: ['peerlink-logo.png', 'favicon.ico'],
       manifest: {

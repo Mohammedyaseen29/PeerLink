@@ -21,6 +21,8 @@ interface PeerLinkServiceWorker extends ServiceWorkerGlobalScope {
   __WB_MANIFEST: PrecacheEntry[]
 }
 
+declare const self: PeerLinkServiceWorker
+
 interface BrokerReply {
   size: number
   mimeType: string
@@ -47,7 +49,23 @@ class BrokerFailure extends Error {
 const sw = globalThis as unknown as PeerLinkServiceWorker
 
 sw.addEventListener('message', (event) => {
-  if (event.data && typeof event.data === 'object' && event.data.type === 'SKIP_WAITING') {
+  if (event.data && typeof event.data === 'object' && event.data.type === 'PEERLINK_CLAIM_CLIENT') {
+    const replyPort = event.ports[0]
+    if (!replyPort) return
+
+    const reply = (message: { type: string; error?: string }) => {
+      try { replyPort.postMessage(message) } catch { /* The requesting page may have closed the channel. */ }
+      try { replyPort.close() } catch { /* The channel may already be closed. */ }
+    }
+    const claim = sw.clients.claim().then(
+      () => reply({ type: 'PEERLINK_CLAIM_CLIENT_ACK' }),
+      (error: unknown) => reply({
+        type: 'PEERLINK_CLAIM_CLIENT_ERROR',
+        error: error instanceof Error ? error.message : String(error)
+      })
+    )
+    event.waitUntil(claim)
+  } else if (event.data && typeof event.data === 'object' && event.data.type === 'SKIP_WAITING') {
     event.waitUntil(sw.skipWaiting())
   }
 })
@@ -253,8 +271,11 @@ registerRoute(
 )
 
 cleanupOutdatedCaches()
-precacheAndRoute((self as unknown as PeerLinkServiceWorker).__WB_MANIFEST)
-registerRoute(new NavigationRoute(createHandlerBoundToURL('index.html')))
+precacheAndRoute(self.__WB_MANIFEST)
+registerRoute(new NavigationRoute(
+  createHandlerBoundToURL('index.html'),
+  import.meta.env.DEV ? { allowlist: [/^\/$/, /^\/index\.html$/] } : undefined
+))
 
 for (const [host, cacheName] of [
   ['fonts.googleapis.com', 'google-fonts-cache'],
