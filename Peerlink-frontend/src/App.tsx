@@ -17,6 +17,7 @@ import { getFileMimeType } from "./utils/helpers";
 import type { QueuedFile } from "./types";
 import { registerPeerLinkServiceWorker } from "./serviceWorker";
 import { CircleAlert, CircleCheck, Info, LoaderCircle, RefreshCw, WifiOff, X } from "lucide-react";
+import { parseRoomInvite } from "./utils/roomInvite";
 
 function App() {
   const [appUpdateReady, setAppUpdateReady] = useState(false);
@@ -68,6 +69,48 @@ function App() {
   } = useP2P();
   const inRoomRef = useRef(inRoom);
   inRoomRef.current = inRoom;
+  const inviteAttempted = useRef(false);
+
+  useEffect(() => {
+    let timer: number | null = null;
+    const scheduleInvite = (fromNavigation = false) => {
+      if (timer !== null) {
+        window.clearTimeout(timer);
+        timer = null;
+      }
+      if (inRoomRef.current) {
+        inviteAttempted.current = true;
+        return;
+      }
+      if (fromNavigation) inviteAttempted.current = false;
+      if (inviteAttempted.current) return;
+
+      const invite = parseRoomInvite(window.location.href);
+      if (!invite) return;
+      timer = window.setTimeout(() => {
+        timer = null;
+        if (inRoomRef.current) {
+          inviteAttempted.current = true;
+          return;
+        }
+        if (inviteAttempted.current) return;
+
+        inviteAttempted.current = true;
+        window.history.replaceState(window.history.state, "", `${window.location.pathname}${window.location.search}`);
+        join(invite.roomId, invite.roomType);
+      }, 0);
+    };
+    const handleNavigation = () => scheduleInvite(true);
+
+    scheduleInvite();
+    window.addEventListener("hashchange", handleNavigation);
+    window.addEventListener("popstate", handleNavigation);
+    return () => {
+      if (timer !== null) window.clearTimeout(timer);
+      window.removeEventListener("hashchange", handleNavigation);
+      window.removeEventListener("popstate", handleNavigation);
+    };
+  }, [inRoom, join]);
 
   useEffect(() => {
     if (!('serviceWorker' in navigator)) return;

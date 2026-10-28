@@ -12,6 +12,12 @@ Persistent rooms keep received copies in that browser's IndexedDB so they can be
 
 Previewable files in the send queue use a browser object URL for the selected `File` directly, so opening a preview does not assemble another whole-file buffer in memory. If the browser did not supply a file MIME type, PeerLink infers common media and document types from the filename. HTML text previews run in a sandboxed frame.
 
+## Room invitations
+
+Create a room, then select **Show QR**. The other person can scan the code with their phone camera and open the link to join automatically. **Copy link** shares the same invitation without scanning. Invitations include the room ID and its temporary or persistent type. Opening an invitation while already in a room does not interrupt that session. Rooms still support two people.
+
+The QR code is generated locally. Invite links also work when opened in an idle existing PeerLink tab. The interface uses bundled IBM Plex Mono font files, including offline precaching.
+
 ## Large-file transfers
 
 Transfers use approximately 64 KiB chunks. The sender reads an initial 16-chunk batch, then reads batches of up to 32 chunks (about 2 MiB) while sending the current batch. The receiver checks each chunk's SHA-256 hash and saves up to 32 ordered chunks in one IndexedDB transaction. While that transaction commits, it can hash one following batch. Progress and sender credit advance only after the transaction completes. Partial receive batches coalesce for up to 128 ms.

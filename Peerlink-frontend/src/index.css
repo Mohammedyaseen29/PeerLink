@@ -1,5 +1,9 @@
 @import "tailwindcss";
 
+@theme {
+    --font-mono: "IBM Plex Mono", "SFMono-Regular", Consolas, monospace;
+}
+
 /* ========================================
    PeerLink Neo-Noir Mono Design System
    ======================================== */
@@ -60,7 +64,9 @@
 }
 
 body {
-    font-family: 'JetBrains Mono', 'Roboto Mono', 'Fira Code', monospace;
+    font-family: 'IBM Plex Mono', 'SFMono-Regular', Consolas, monospace;
+    font-weight: 400;
+    letter-spacing: -0.01em;
     background: var(--bg-primary);
     color: var(--fg);
     min-height: 100vh;
@@ -2502,4 +2508,72 @@ body {
 
 @media (max-width: 640px) {
     .member-list { grid-template-columns: 1fr; }
+}
+
+.room-invite-open-btn,
+.room-invite-copy {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0.45rem;
+    padding: 0.55rem 0.8rem;
+    border: 1px solid var(--border-hover);
+    border-radius: var(--radius-md);
+    background: var(--bg-secondary);
+    color: var(--fg);
+    font: inherit;
+    font-size: 0.75rem;
+    cursor: pointer;
+    transition: background var(--transition-fast), color var(--transition-fast), border-color var(--transition-fast);
+}
+
+.room-invite-open-btn:hover:not(:disabled),
+.room-invite-copy:hover {
+    background: var(--bg-elevated);
+    border-color: var(--info);
+}
+
+.room-invite-open-btn:disabled { opacity: 0.45; cursor: not-allowed; }
+.room-invite-open-btn:focus-visible,
+.room-invite-copy:focus-visible,
+.room-invite-close:focus-visible { outline: 2px solid var(--info); outline-offset: 2px; }
+
+.room-invite-dialog {
+    width: min(440px, calc(100% - 2rem));
+    max-height: calc(100vh - 2rem);
+    max-height: calc(100dvh - 2rem);
+    margin: auto;
+    padding: 0;
+    overflow: auto;
+    border: 1px solid var(--border-hover);
+    border-radius: var(--radius-lg);
+    background: var(--bg-card);
+    color: var(--fg);
+    box-shadow: 0 24px 80px rgba(0, 0, 0, 0.6);
+}
+
+.room-invite-dialog::backdrop { background: rgba(0, 0, 0, 0.72); backdrop-filter: blur(4px); }
+.room-invite-content { display: flex; flex-direction: column; gap: var(--spacing-md); padding: var(--spacing-lg); }
+.room-invite-header { display: flex; align-items: flex-start; justify-content: space-between; gap: var(--spacing-md); }
+.room-invite-header h2 { color: var(--fg); font-size: 1rem; font-weight: 600; line-height: 1.35; }
+.room-invite-eyebrow { display: flex; align-items: center; gap: 0.4rem; margin-bottom: 0.3rem; color: var(--info); font-size: 0.65rem; font-weight: 500; text-transform: uppercase; letter-spacing: 0.08em; }
+.room-invite-close { display: grid; place-items: center; width: 34px; height: 34px; flex: 0 0 34px; border: 1px solid var(--border); border-radius: var(--radius-md); background: var(--bg-secondary); color: var(--fg-secondary); cursor: pointer; }
+.room-invite-close:hover { color: var(--fg); background: var(--bg-elevated); }
+.room-invite-description { color: var(--fg-secondary); font-size: 0.75rem; line-height: 1.55; }
+.room-invite-details { display: flex; align-items: center; justify-content: space-between; gap: var(--spacing-sm); min-width: 0; }
+.room-invite-id { min-width: 0; overflow: hidden; color: var(--fg); font-family: var(--font-mono); font-size: 0.78rem; text-overflow: ellipsis; white-space: nowrap; }
+.room-invite-type { flex: 0 0 auto; color: var(--fg-muted); font-size: 0.64rem; }
+.room-invite-type.temporary { color: var(--danger); }
+.room-invite-qr { align-self: center; padding: 0.5rem; border-radius: var(--radius-md); background: #fff; }
+.room-invite-qr svg { display: block; width: min(240px, 65vw); height: auto; }
+.room-invite-link-label { color: var(--fg-secondary); font-size: 0.7rem; font-weight: 500; }
+.room-invite-link-row { display: flex; align-items: stretch; gap: var(--spacing-sm); min-width: 0; }
+.room-invite-link-input { flex: 1; min-width: 0; padding: 0.55rem 0.65rem; border: 1px solid var(--border); border-radius: var(--radius-md); background: var(--bg-secondary); color: var(--fg-secondary); font: 0.65rem var(--font-mono); }
+.room-invite-copy { flex: 0 0 auto; padding-inline: 0.65rem; font-size: 0.68rem; }
+.room-invite-copy-error { color: var(--danger); font-size: 0.68rem; line-height: 1.45; }
+
+@media (max-width: 420px) {
+    .room-invite-content { padding: var(--spacing-md); }
+    .room-invite-link-row { flex-direction: column; }
+    .room-invite-copy { align-self: flex-end; }
 }

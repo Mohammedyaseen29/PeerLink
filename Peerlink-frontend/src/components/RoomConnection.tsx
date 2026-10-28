@@ -1,7 +1,9 @@
 import { useState } from "react";
-import { LogIn, Hash, Clock, Database, Zap, Users, UserPlus, Copy, Check, LogOut } from "lucide-react";
+import { LogIn, Hash, Clock, Database, Zap, Users, UserPlus, Copy, Check, LogOut, QrCode } from "lucide-react";
 import { ConnectionIndicator } from "./ConnectionIndicator";
 import { Avatar } from "./Avatar";
+import { RoomInviteDialog } from "./RoomInviteDialog";
+import { isValidRoomId } from "../utils/roomInvite";
 import type { ConnectionType, RoomType } from "../types";
 
 type RoomMode = "selection" | "create" | "join";
@@ -39,6 +41,8 @@ export function RoomConnection({
     const [selectedRoomType, setSelectedRoomType] = useState<RoomType>("persistent");
     const [copiedRoomId, setCopiedRoomId] = useState<string | null>(null);
     const [copyError, setCopyError] = useState(false);
+    const [isInviteOpen, setIsInviteOpen] = useState(false);
+    const canShareRoom = isValidRoomId(roomId);
 
     const handleCopyRoomId = async (id: string) => {
         const value = id.trim();
@@ -122,9 +126,28 @@ export function RoomConnection({
                             {roomType === "temporary" ? <Clock size={12} /> : <Database size={12} />}
                             <span>{roomType === "temporary" ? "Temporary" : "Persistent"}</span>
                         </div>
+
+                        <button
+                            type="button"
+                            className="room-invite-open-btn"
+                            aria-haspopup="dialog"
+                            onClick={() => { if (canShareRoom) setIsInviteOpen(true); }}
+                            disabled={!canShareRoom}
+                            title={canShareRoom ? "Show a QR code to join this room" : "This room ID cannot be shared as an invite link"}
+                        >
+                            <QrCode size={16} />
+                            <span>Show QR</span>
+                        </button>
                     </div>
 
                     {copyError && <p className="room-copy-error" role="status">Could not copy the room ID. Please select and copy it manually.</p>}
+
+                    <RoomInviteDialog
+                        isOpen={isInviteOpen}
+                        onClose={() => setIsInviteOpen(false)}
+                        roomId={roomId}
+                        roomType={roomType}
+                    />
 
                     <div className="room-card-footer">
                         <ConnectionIndicator connected={connected} connectionType={connectionType} status={signalingStatus} />
