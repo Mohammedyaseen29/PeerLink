@@ -2511,6 +2511,7 @@ body {
 }
 
 .room-invite-open-btn,
+.room-scan-open-btn,
 .room-invite-copy {
     display: inline-flex;
     align-items: center;
@@ -2528,13 +2529,16 @@ body {
 }
 
 .room-invite-open-btn:hover:not(:disabled),
+.room-scan-open-btn:hover:not(:disabled),
 .room-invite-copy:hover {
     background: var(--bg-elevated);
     border-color: var(--info);
 }
 
-.room-invite-open-btn:disabled { opacity: 0.45; cursor: not-allowed; }
+.room-invite-open-btn:disabled,
+.room-scan-open-btn:disabled { opacity: 0.45; cursor: not-allowed; }
 .room-invite-open-btn:focus-visible,
+.room-scan-open-btn:focus-visible,
 .room-invite-copy:focus-visible,
 .room-invite-close:focus-visible { outline: 2px solid var(--info); outline-offset: 2px; }
 
@@ -2576,4 +2580,40 @@ body {
     .room-invite-content { padding: var(--spacing-md); }
     .room-invite-link-row { flex-direction: column; }
     .room-invite-copy { align-self: flex-end; }
+}
+
+.room-scan-open-btn { align-self: flex-start; }
+.room-scan-dialog {
+    width: min(520px, calc(100% - 2rem));
+    max-height: calc(100vh - 2rem);
+    max-height: calc(100dvh - 2rem);
+    margin: auto;
+    padding: 0;
+    overflow: auto;
+    border: 1px solid var(--border-hover);
+    border-radius: var(--radius-lg);
+    background: var(--bg-card);
+    color: var(--fg);
+    box-shadow: 0 24px 80px rgba(0, 0, 0, 0.6);
+}
+.room-scan-dialog::backdrop { background: rgba(0, 0, 0, 0.72); backdrop-filter: blur(4px); }
+.room-scan-content { display: flex; flex-direction: column; gap: var(--spacing-md); padding: var(--spacing-lg); }
+.room-scan-header { display: flex; align-items: flex-start; justify-content: space-between; gap: var(--spacing-md); }
+.room-scan-header h2 { color: var(--fg); font-size: 1rem; font-weight: 600; line-height: 1.35; }
+.room-scan-video-frame { display: grid; place-items: center; width: 100%; aspect-ratio: 4 / 3; max-height: min(56vh, 380px); overflow: hidden; border: 1px solid var(--border); border-radius: var(--radius-md); background: #090909; }
+.room-scan-video { display: block; width: 100%; height: 100%; object-fit: cover; }
+.room-scan-status { display: flex; align-items: center; gap: var(--spacing-sm); min-height: 1.5rem; color: var(--fg-secondary); font-size: 0.72rem; line-height: 1.5; }
+.room-scan-status.scanning { color: var(--success); }
+.room-scan-status.joining { color: var(--info); }
+.room-scan-status.error,
+.room-scan-error { color: var(--danger); }
+.room-scan-error { font-size: 0.72rem; line-height: 1.5; }
+.room-scan-retry { display: inline-flex; align-items: center; justify-content: center; gap: 0.45rem; align-self: flex-start; padding: 0.55rem 0.8rem; border: 1px solid var(--border-hover); border-radius: var(--radius-md); background: var(--bg-secondary); color: var(--fg); font: inherit; font-size: 0.72rem; cursor: pointer; }
+.room-scan-retry:hover { background: var(--bg-elevated); border-color: var(--info); }
+.room-scan-retry:focus-visible { outline: 2px solid var(--info); outline-offset: 2px; }
+.room-scan-manual-hint { color: var(--fg-muted); font-size: 0.67rem; line-height: 1.5; }
+
+@media (max-width: 420px) {
+    .room-scan-content { padding: var(--spacing-md); }
+    .room-scan-video-frame { aspect-ratio: 1 / 1; max-height: 45vh; }
 }

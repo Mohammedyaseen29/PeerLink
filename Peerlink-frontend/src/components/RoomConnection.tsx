@@ -3,7 +3,9 @@ import { LogIn, Hash, Clock, Database, Zap, Users, UserPlus, Copy, Check, LogOut
 import { ConnectionIndicator } from "./ConnectionIndicator";
 import { Avatar } from "./Avatar";
 import { RoomInviteDialog } from "./RoomInviteDialog";
+import { RoomScanDialog } from "./RoomScanDialog";
 import { isValidRoomId } from "../utils/roomInvite";
+import type { RoomInvite } from "../utils/roomInvite";
 import type { ConnectionType, RoomType } from "../types";
 
 type RoomMode = "selection" | "create" | "join";
@@ -42,6 +44,7 @@ export function RoomConnection({
     const [copiedRoomId, setCopiedRoomId] = useState<string | null>(null);
     const [copyError, setCopyError] = useState(false);
     const [isInviteOpen, setIsInviteOpen] = useState(false);
+    const [isScannerOpen, setIsScannerOpen] = useState(false);
     const canShareRoom = isValidRoomId(roomId);
 
     const handleCopyRoomId = async (id: string) => {
@@ -64,6 +67,14 @@ export function RoomConnection({
             const roomTypeToUse = mode === "join" ? "persistent" : selectedRoomType;
             onJoin(inputValue.trim(), roomTypeToUse);
         }
+    };
+
+    const handleScannedInvite = (invite: RoomInvite) => {
+        if (isWaiting || connected || inRoom) return;
+        setInputValue(invite.roomId);
+        onRoomIdChange(invite.roomId);
+        setIsWaiting(true);
+        onJoin(invite.roomId, invite.roomType);
     };
 
     const handleKeyPress = (e: React.KeyboardEvent) => {
@@ -304,6 +315,23 @@ export function RoomConnection({
                                 />
                             </div>
                         </div>
+
+                        <button
+                            type="button"
+                            className="room-scan-open-btn"
+                            aria-haspopup="dialog"
+                            onClick={() => { if (!isWaiting && !connected && !inRoom) setIsScannerOpen(true); }}
+                            disabled={isWaiting || connected || inRoom}
+                        >
+                            <QrCode size={17} />
+                            <span>Scan QR</span>
+                        </button>
+
+                        <RoomScanDialog
+                            isOpen={isScannerOpen}
+                            onClose={() => setIsScannerOpen(false)}
+                            onScanned={handleScannedInvite}
+                        />
 
                         <button 
                             onClick={handleJoin}

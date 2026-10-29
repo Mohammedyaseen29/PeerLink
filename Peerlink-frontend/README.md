@@ -18,6 +18,8 @@ Create a room, then select **Show QR**. The other person can scan the code with 
 
 The QR code is generated locally. Invite links also work when opened in an idle existing PeerLink tab. The interface uses bundled IBM Plex Mono font files, including offline precaching.
 
+Already inside PeerLink? Choose **Join Room → Scan QR**, allow camera access, and point the camera at the sender's code. A recognized invitation joins directly with the encoded room type. Closing the scanner or joining stops the camera. Camera errors include a retry option, and manual room ID entry remains available.
+
 ## Large-file transfers
 
 Transfers use approximately 64 KiB chunks. The sender reads an initial 16-chunk batch, then reads batches of up to 32 chunks (about 2 MiB) while sending the current batch. The receiver checks each chunk's SHA-256 hash and saves up to 32 ordered chunks in one IndexedDB transaction. While that transaction commits, it can hash one following batch. Progress and sender credit advance only after the transaction completes. Partial receive batches coalesce for up to 128 ms.
