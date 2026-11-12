@@ -40,6 +40,8 @@ export type RecipientTransfer = {
 
 export type ConnectionType = "disconnected" | "local" | "p2p" | "relay";
 
+export type SignalingStatus = "idle" | "connecting" | "waiting" | "negotiating" | "unreachable" | "offline" | "full";
+
 export type TransferStats = {
     currentSpeed: number; // bytes per second
     estimatedTimeRemaining: number; // seconds

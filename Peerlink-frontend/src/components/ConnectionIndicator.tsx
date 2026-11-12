@@ -1,10 +1,10 @@
 import { Wifi, Globe, Server, WifiOff, LoaderCircle } from "lucide-react";
-import type { ConnectionType } from "../types";
+import type { ConnectionType, SignalingStatus } from "../types";
 
 interface ConnectionIndicatorProps {
     connected: boolean;
     connectionType: ConnectionType;
-    status?: "idle" | "connecting" | "waiting" | "negotiating" | "offline" | "full";
+    status?: SignalingStatus;
 }
 
 const connectionConfig = {
@@ -31,6 +31,12 @@ const connectionConfig = {
         label: "Connecting peer",
         color: "indicator-p2p",
         description: "Establishing the peer connection",
+    },
+    unreachable: {
+        icon: WifiOff,
+        label: "Could not connect to peer",
+        color: "indicator-disconnected",
+        description: "The peer is in the room, but the connection could not be established",
     },
     offline: {
         icon: WifiOff,

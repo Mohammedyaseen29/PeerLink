@@ -67,6 +67,7 @@ function App() {
     dismissToast,
     notifyError,
   } = useP2P();
+  const retryablePeer = members.find((member) => member.status === "disconnected" && member.supportsReconnect === true);
   const inRoomRef = useRef(inRoom);
   inRoomRef.current = inRoom;
   const inviteAttempted = useRef(false);
@@ -290,15 +291,16 @@ function App() {
         {inRoom && (
           <>
             {!connected && (
-              <div className={`room-status ${signalingStatus === "offline" || signalingStatus === "full" ? "room-status-offline" : ""}`} role="status" aria-live="polite">
+              <div className={`room-status ${signalingStatus === "offline" || signalingStatus === "full" || signalingStatus === "unreachable" ? "room-status-offline" : ""}`} role="status" aria-live="polite">
                 <div className="room-status-icon">
-                  {signalingStatus === "offline" || signalingStatus === "full" ? <WifiOff size={20} /> : <LoaderCircle size={20} className="room-status-spinner" />}
+                  {signalingStatus === "offline" || signalingStatus === "full" || signalingStatus === "unreachable" ? <WifiOff size={20} /> : <LoaderCircle size={20} className="room-status-spinner" />}
                 </div>
                 <div className="room-status-copy">
-                  <strong>{signalingStatus === "connecting" ? "Connecting to room" : signalingStatus === "negotiating" ? "Securing peer connection" : signalingStatus === "offline" ? "Room is offline" : signalingStatus === "full" ? "Room is full" : "Waiting for your peer"}</strong>
-                  <span>{signalingStatus === "full" ? "Rooms support up to two people. Saved files on this device remain available below." : signalingStatus === "offline" ? "Stored files are ready to preview or download. Reconnect when you're ready to share." : signalingStatus === "negotiating" ? "Establishing a direct transfer path." : signalingStatus === "connecting" ? "Checking the room and loading saved files." : "Share the room ID to start transferring."}</span>
+                  <strong>{signalingStatus === "connecting" ? "Connecting to room" : signalingStatus === "negotiating" ? "Securing peer connection" : signalingStatus === "offline" ? "Room is offline" : signalingStatus === "full" ? "Room is full" : signalingStatus === "unreachable" ? "Could not connect to peer" : "Waiting for your peer"}</strong>
+                  <span>{signalingStatus === "full" ? "Rooms support up to two people. Saved files on this device remain available below." : signalingStatus === "offline" ? "Stored files are ready to preview or download. Reconnect when you're ready to share." : signalingStatus === "negotiating" ? "Establishing the peer connection." : signalingStatus === "unreachable" ? "The peer is in the room, but the connection could not be established." : signalingStatus === "connecting" ? "Checking the room and loading saved files." : "Share the room ID to start transferring."}</span>
                 </div>
                 {signalingStatus === "offline" && <button type="button" className="room-status-retry" onClick={retryConnection}><RefreshCw size={15} /> Retry</button>}
+                {signalingStatus === "unreachable" && retryablePeer && <button type="button" className="room-status-retry" onClick={() => retryPeerConnection(retryablePeer.peerId)}><RefreshCw size={15} /> Retry</button>}
               </div>
             )}
 

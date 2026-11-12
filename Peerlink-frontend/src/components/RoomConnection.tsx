@@ -6,7 +6,7 @@ import { RoomInviteDialog } from "./RoomInviteDialog";
 import { RoomScanDialog } from "./RoomScanDialog";
 import { isValidRoomId } from "../utils/roomInvite";
 import type { RoomInvite } from "../utils/roomInvite";
-import type { ConnectionType, RoomType } from "../types";
+import type { ConnectionType, RoomType, SignalingStatus } from "../types";
 
 type RoomMode = "selection" | "create" | "join";
 
@@ -18,7 +18,7 @@ interface RoomConnectionProps {
     connected: boolean;
     inRoom: boolean;
     connectionType: ConnectionType;
-    signalingStatus: "idle" | "connecting" | "waiting" | "negotiating" | "offline" | "full";
+    signalingStatus: SignalingStatus;
     roomType: RoomType;
     generateRoomId: () => string;
     avatar: string;
