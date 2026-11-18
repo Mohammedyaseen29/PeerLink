@@ -1,7 +1,7 @@
 @import "tailwindcss";
 
 @theme {
-    --font-mono: "IBM Plex Mono", "SFMono-Regular", Consolas, monospace;
+    --font-mono: "JetBrains Mono", "SFMono-Regular", Consolas, monospace;
 }
 
 /* ========================================
@@ -64,7 +64,7 @@
 }
 
 body {
-    font-family: 'IBM Plex Mono', 'SFMono-Regular', Consolas, monospace;
+    font-family: 'JetBrains Mono', 'SFMono-Regular', Consolas, monospace;
     font-weight: 400;
     letter-spacing: -0.01em;
     background: var(--bg-primary);

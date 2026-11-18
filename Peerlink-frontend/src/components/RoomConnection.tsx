@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { LogIn, Hash, Clock, Database, Zap, Users, UserPlus, Copy, Check, LogOut, QrCode } from "lucide-react";
+import { LogIn, Hash, Clock, Database, Zap, Users, SquarePlus, Copy, Check, LogOut, QrCode } from "lucide-react";
 import { ConnectionIndicator } from "./ConnectionIndicator";
 import { RoomInviteDialog } from "./RoomInviteDialog";
 import { RoomScanDialog } from "./RoomScanDialog";
@@ -194,7 +194,7 @@ export function RoomConnection({
                                 className="room-mode-btn create room-workspace-choice"
                             >
                                 <div className="room-mode-icon room-workspace-choice-icon">
-                                    <UserPlus size={24} />
+                                    <SquarePlus size={22} strokeWidth={1.8} />
                                 </div>
                                 <span className="room-mode-label">Create a room</span>
                                 <span className="room-mode-desc">Choose an ID and room type.</span>

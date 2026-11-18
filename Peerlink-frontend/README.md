@@ -16,7 +16,7 @@ Previewable files in the send queue use a browser object URL for the selected `F
 
 Create a room, then select **Show QR**. The other person can scan the code with their phone camera and open the link to join automatically. **Copy link** shares the same invitation without scanning. Invitations include the room ID and its temporary or persistent type. Opening an invitation while already in a room does not interrupt that session. Rooms still support two people.
 
-The QR code is generated locally. Invite links also work when opened in an idle existing PeerLink tab. The interface uses bundled IBM Plex Mono font files, including offline precaching.
+The QR code is generated locally. Invite links also work when opened in an idle existing PeerLink tab. The interface uses bundled JetBrains Mono font files, including offline precaching.
 
 Already inside PeerLink? Choose **Join Room → Scan QR**, allow camera access, and point the camera at the sender's code. A recognized invitation joins directly with the encoded room type. Closing the scanner or joining stops the camera. Camera errors include a retry option, and manual room ID entry remains available.
 

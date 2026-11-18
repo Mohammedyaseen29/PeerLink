@@ -21,6 +21,7 @@
 .room-workspace-room .room-workspace-choice { display: grid; grid-template-columns: 44px minmax(0, 1fr); grid-template-areas: "icon title" "icon desc"; align-content: center; align-items: center; justify-items: start; gap: 3px 12px; min-width: 0; min-height: 96px; padding: 16px; border: 1px solid var(--border); border-radius: 12px; background: var(--bg-secondary); text-align: left; }
 .room-workspace-room .room-workspace-choice:hover { transform: translateY(-1px); border-color: rgba(144, 201, 255, 0.5); background: var(--bg-elevated); }
 .room-workspace-choice-icon { grid-area: icon; width: 40px; height: 40px; margin: 0; border: 1px solid rgba(144, 201, 255, 0.25); border-radius: 10px; background: rgba(144, 201, 255, 0.1); color: var(--info); }
+.room-workspace-room .room-mode-btn .room-workspace-choice-icon { background: rgba(144, 201, 255, 0.1); color: var(--info); }
 .room-workspace-choice .room-mode-label { grid-area: title; color: var(--fg); font-size: 0.85rem; }
 .room-workspace-choice .room-mode-desc { grid-area: desc; color: var(--fg-secondary); font-size: 0.68rem; line-height: 1.45; }
 .room-workspace-room .room-workspace-choice:focus-visible { outline: 2px solid var(--info); outline-offset: 2px; }
