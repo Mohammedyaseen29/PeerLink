@@ -50,12 +50,6 @@ const connectionConfig = {
         color: "indicator-disconnected",
         description: "Rooms support up to two people",
     },
-    unsupported: {
-        icon: WifiOff,
-        label: "Local files only",
-        color: "indicator-disconnected",
-        description: "This browser cannot establish a peer connection",
-    },
     local: {
         icon: Wifi,
         label: "Local Network",

@@ -52,12 +52,6 @@ export function SendQueue({ queue, onPause, onResume, onRetry, onRemove, onClear
     const speed = queue.reduce((total, file) => total + transferSpeed(file), 0);
     const eta = speed > 0 ? Math.max(0, (totalBytes - transferredBytes) / speed) : Infinity;
     const progress = totalBytes > 0 ? Math.min(100, transferredBytes / totalBytes * 100) : sentCount === queue.length ? 100 : 0;
-    const cancelableCount = queue.filter(file => ["sending", "pending", "paused"].includes(file.status)).length;
-    const clearLabel = cancelableCount > 0 ? "Cancel & clear" : sentCount === queue.length ? "Clear sent" : "Clear queue";
-    const clearQueue = () => {
-        if (cancelableCount > 0 && !window.confirm(`Cancel ${cancelableCount} unfinished transfers and clear the sending queue?`)) return;
-        onClearAll();
-    };
     const pageCount = Math.max(1, Math.ceil(queue.length / PAGE_SIZE));
     const visiblePage = Math.min(page, pageCount - 1);
     const visibleFiles = queue.slice(visiblePage * PAGE_SIZE, (visiblePage + 1) * PAGE_SIZE);
@@ -69,15 +63,9 @@ export function SendQueue({ queue, onPause, onResume, onRetry, onRemove, onClear
                     Sending Queue
                     <span className="queue-count">{sentCount}/{queue.length} files sent</span>
                 </h3>
-                <button
-                    type="button"
-                    onClick={clearQueue}
-                    className="btn-icon btn-danger-text queue-clear-button"
-                    aria-label={cancelableCount > 0 ? `Cancel ${cancelableCount} unfinished transfers and clear the sending queue` : sentCount === queue.length ? "Clear completed transfers from the sending queue" : "Clear the sending queue"}
-                    title={cancelableCount > 0 ? "Cancels unfinished transfers and clears the sending queue" : sentCount === queue.length ? "Clear completed transfers" : "Clear the sending queue"}
-                >
+                <button type="button" onClick={onClearAll} className="btn-icon btn-danger-text" aria-label="Clear transfer queue" title="Clear transfer queue">
                     <X size={16} aria-hidden="true" />
-                    <span>{clearLabel}</span>
+                    <span>Clear queue</span>
                 </button>
             </div>
 

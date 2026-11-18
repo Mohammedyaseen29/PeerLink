@@ -4,7 +4,7 @@ import { ConnectionIndicator } from "./ConnectionIndicator";
 import { Avatar } from "./Avatar";
 import { RoomInviteDialog } from "./RoomInviteDialog";
 import { RoomScanDialog } from "./RoomScanDialog";
-import { isValidRoomId, parseRoomInvite } from "../utils/roomInvite";
+import { isValidRoomId } from "../utils/roomInvite";
 import type { RoomInvite } from "../utils/roomInvite";
 import type { ConnectionType, RoomType, SignalingStatus } from "../types";
 
@@ -43,7 +43,6 @@ export function RoomConnection({
     const [selectedRoomType, setSelectedRoomType] = useState<RoomType>("persistent");
     const [copiedRoomId, setCopiedRoomId] = useState<string | null>(null);
     const [copyError, setCopyError] = useState(false);
-    const [inputError, setInputError] = useState<string | null>(null);
     const [isInviteOpen, setIsInviteOpen] = useState(false);
     const [isScannerOpen, setIsScannerOpen] = useState(false);
     const canShareRoom = isValidRoomId(roomId);
@@ -63,38 +62,31 @@ export function RoomConnection({
     };
 
     const handleJoin = () => {
-        if (isWaiting || connected) return;
-        const value = inputValue.trim();
-        const invite = mode === "join"
-            ? (isValidRoomId(value) ? { roomId: value, roomType: "persistent" as const } : parseRoomInvite(value))
-            : (isValidRoomId(value) ? { roomId: value, roomType: selectedRoomType } : null);
-        if (!invite) {
-            setInputError(mode === "join"
-                ? "Enter a valid room ID or paste a PeerLink invite link."
-                : "Use letters, numbers, hyphens, and underscores for the room ID.");
-            return;
+        if (inputValue.trim() && !isWaiting && !connected) {
+            setIsWaiting(true);
+            const roomTypeToUse = mode === "join" ? "persistent" : selectedRoomType;
+            onJoin(inputValue.trim(), roomTypeToUse);
         }
-        setInputError(null);
-        setInputValue(invite.roomId);
-        onRoomIdChange(invite.roomId);
-        setIsWaiting(true);
-        onJoin(invite.roomId, invite.roomType);
     };
 
     const handleScannedInvite = (invite: RoomInvite) => {
         if (isWaiting || connected || inRoom) return;
         setInputValue(invite.roomId);
         onRoomIdChange(invite.roomId);
-        setInputError(null);
         setIsWaiting(true);
         onJoin(invite.roomId, invite.roomType);
+    };
+
+    const handleKeyPress = (e: React.KeyboardEvent) => {
+        if (e.key === "Enter" && !isWaiting && !connected) {
+            handleJoin();
+        }
     };
 
     const handleRoomTypeChange = (type: RoomType) => {
         setSelectedRoomType(type);
         setCopiedRoomId(null);
         setCopyError(false);
-        setInputError(null);
         if (type === "temporary") {
             const newRoomId = generateRoomId();
             setInputValue(newRoomId);
@@ -107,7 +99,6 @@ export function RoomConnection({
 
     const handleCreateClick = () => {
         setMode("create");
-        setInputError(null);
         if (selectedRoomType === "temporary") {
             const newRoomId = generateRoomId();
             setInputValue(newRoomId);
@@ -118,7 +109,6 @@ export function RoomConnection({
     const handleJoinClick = () => {
         setMode("join");
         setSelectedRoomType("persistent");
-        setInputError(null);
     };
 
     if (connected || inRoom) {
@@ -129,7 +119,7 @@ export function RoomConnection({
                         <div className="room-user-info">
                             <Avatar avatarId={avatar} size="sm" />
                             <div className="room-id-display">
-                                <span className="room-id-label">Room ID</span>
+                                <span className="text-sm text-gray-400">Room: </span>
                                 <span className="room-id-value text-sm font-mono text-white">{roomId}</span>
                                 <button
                                     type="button"
@@ -148,7 +138,7 @@ export function RoomConnection({
                             <span>{roomType === "temporary" ? "Temporary" : "Persistent"}</span>
                         </div>
 
-                        {signalingStatus !== "unsupported" && <button
+                        <button
                             type="button"
                             className="room-invite-open-btn"
                             aria-haspopup="dialog"
@@ -158,7 +148,7 @@ export function RoomConnection({
                         >
                             <QrCode size={16} />
                             <span>Show QR</span>
-                        </button>}
+                        </button>
                     </div>
 
                     {copyError && <p className="room-copy-error" role="status">Could not copy the room ID. Please select and copy it manually.</p>}
@@ -171,9 +161,9 @@ export function RoomConnection({
                     />
 
                     <div className="room-card-footer">
-                        {connected && <ConnectionIndicator connected={connected} connectionType={connectionType} status={signalingStatus} />}
+                        <ConnectionIndicator connected={connected} connectionType={connectionType} status={signalingStatus} />
                         <button type="button" className="room-leave-btn" onClick={onLeave}>
-                            <LogOut size={15} /><span>{signalingStatus === "unsupported" ? "Close local view" : "Leave room"}</span>
+                            <LogOut size={15} /><span>Leave room</span>
                         </button>
                     </div>
                 </div>
@@ -189,7 +179,6 @@ export function RoomConnection({
                         <h3 className="room-mode-title">Start or Join a Room</h3>
                         <div className="room-mode-buttons">
                             <button
-                                type="button"
                                 onClick={handleCreateClick}
                                 className="room-mode-btn create"
                             >
@@ -201,7 +190,6 @@ export function RoomConnection({
                             </button>
                             
                             <button
-                                type="button"
                                 onClick={handleJoinClick}
                                 className="room-mode-btn join"
                             >
@@ -216,9 +204,8 @@ export function RoomConnection({
                 )}
 
                 {mode === "create" && (
-                    <form className="room-create-form" onSubmit={(event) => { event.preventDefault(); handleJoin(); }}>
+                    <div className="room-create-form">
                         <button
-                            type="button"
                             onClick={() => setMode("selection")}
                             className="back-btn"
                         >
@@ -232,7 +219,6 @@ export function RoomConnection({
                                     type="button"
                                     onClick={() => handleRoomTypeChange("persistent")}
                                     className={`room-type-btn ${selectedRoomType === "persistent" ? "active" : ""}`}
-                                    aria-pressed={selectedRoomType === "persistent"}
                                 >
                                     <Database size={14} />
                                     <span>Persistent</span>
@@ -241,7 +227,6 @@ export function RoomConnection({
                                     type="button"
                                     onClick={() => handleRoomTypeChange("temporary")}
                                     className={`room-type-btn ${selectedRoomType === "temporary" ? "active" : ""}`}
-                                    aria-pressed={selectedRoomType === "temporary"}
                                 >
                                     <Zap size={14} />
                                     <span>Temporary</span>
@@ -254,26 +239,22 @@ export function RoomConnection({
                             </p>
                         </div>
 
-                        <div className="input-group room-field-group">
-                            <label className="room-field-label" htmlFor="create-room-id">Room ID</label>
+                        <div className="input-group">
                             <div className="input-wrapper">
                                 <Hash size={20} className="input-icon" />
                                 <input
-                                    id="create-room-id"
                                     type="text"
-                                    placeholder={selectedRoomType === "temporary" ? "Generated room ID" : "e.g. project-room"}
+                                    placeholder={selectedRoomType === "temporary" ? "Auto-generated room ID" : "Enter Room ID"}
                                     value={inputValue}
                                     onChange={(e) => {
                                         setInputValue(e.target.value);
                                         onRoomIdChange(e.target.value);
                                         setCopiedRoomId(null);
                                         setCopyError(false);
-                                        setInputError(null);
                                     }}
+                                    onKeyPress={handleKeyPress}
                                     className="room-input room-input-copyable"
                                     disabled={isWaiting}
-                                    aria-invalid={Boolean(inputError)}
-                                    aria-describedby={inputError ? "create-room-id-error" : undefined}
                                 />
                                 <button
                                     type="button"
@@ -289,60 +270,51 @@ export function RoomConnection({
                             </div>
                         </div>
 
-                        {inputError && <p id="create-room-id-error" className="room-input-error" role="alert">{inputError}</p>}
-
                         {copyError && <p className="room-copy-error" role="status">Could not copy the room ID. Please select and copy it manually.</p>}
 
                         <button 
-                            type="submit"
+                            onClick={handleJoin}
                             className="btn btn-primary join-btn full-width"
-                            disabled={isWaiting || !inputValue.trim() || Boolean(inputError)}
+                            disabled={isWaiting || !inputValue.trim()}
                         >
                             <Users size={18} />
                             <span>{isWaiting ? "Creating..." : "Create Room"}</span>
                         </button>
 
                         {isWaiting && (
-                            <p className="waiting-text" role="status">
-                                Waiting for the other person to join…
+                            <p className="waiting-text">
+                                Waiting for other peer to connect...
                             </p>
                         )}
-                    </form>
+                    </div>
                 )}
 
                 {mode === "join" && (
-                    <form className="room-join-form" onSubmit={(event) => { event.preventDefault(); handleJoin(); }}>
+                    <div className="room-join-form">
                         <button
-                            type="button"
                             onClick={() => setMode("selection")}
                             className="back-btn"
                         >
                             ← Back
                         </button>
                         
-                        <div className="input-group room-field-group">
-                            <label className="room-field-label" htmlFor="join-room-id">Room ID</label>
+                        <div className="input-group">
                             <div className="input-wrapper">
                                 <Hash size={20} className="input-icon" />
                                 <input
-                                    id="join-room-id"
                                     type="text"
-                                    placeholder="Room ID or invite link"
+                                    placeholder="Paste Room ID here"
                                     value={inputValue}
                                     onChange={(e) => {
                                         setInputValue(e.target.value);
                                         onRoomIdChange(e.target.value);
-                                        setInputError(null);
                                     }}
+                                    onKeyPress={handleKeyPress}
                                     className="room-input"
                                     disabled={isWaiting}
-                                    aria-invalid={Boolean(inputError)}
-                                    aria-describedby={inputError ? "join-room-id-error" : undefined}
                                 />
                             </div>
                         </div>
-                        <p className="room-field-hint">Paste a room ID or a PeerLink invite link.</p>
-                        {inputError && <p id="join-room-id-error" className="room-input-error" role="alert">{inputError}</p>}
 
                         <button
                             type="button"
@@ -362,22 +334,23 @@ export function RoomConnection({
                         />
 
                         <button 
-                            type="submit"
+                            onClick={handleJoin}
                             className="btn btn-primary join-btn full-width"
-                            disabled={isWaiting || !inputValue.trim() || Boolean(inputError)}
+                            disabled={isWaiting || !inputValue.trim()}
                         >
                             <LogIn size={18} />
                             <span>{isWaiting ? "Joining..." : "Join Room"}</span>
                         </button>
 
                         {isWaiting && (
-                            <p className="waiting-text" role="status">
-                                Waiting for the other person to join…
+                            <p className="waiting-text">
+                                Waiting for peer to accept...
                             </p>
                         )}
-                    </form>
+                    </div>
                 )}
 
+                <ConnectionIndicator connected={connected} connectionType={connectionType} />
             </div>
         </div>
     );
