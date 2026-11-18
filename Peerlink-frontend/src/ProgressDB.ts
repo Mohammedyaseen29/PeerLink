@@ -1,9 +1,13 @@
+import { downloadWithServiceWorker } from './download/serviceWorkerDownload';
+
 export const DB_NAME = "PeerLink_files";
 export const DB_VERSION = 4;
 export const CHUNK_STORE = "chunks";
 export const PROGRESS_STORE = "progress";
 export const FILE_STORE = "files";
 const LARGE_PREVIEW_THRESHOLD = 32 * 1024 * 1024;
+const MAX_FILE_RANGE_BYTES = 1024 * 1024;
+const MAX_BLOB_DOWNLOAD_BYTES = 32 * 1024 * 1024;
 const PREVIEW_STALE_AGE_MS = 24 * 60 * 60 * 1000;
 const MAX_PREVIEW_CLEANUP_ENTRIES = 512;
 const PREVIEW_FILE_PREFIX = ".peerlink-preview-";
@@ -160,8 +164,7 @@ export async function readFileRange(
   start: number,
   end: number
 ): Promise<ArrayBuffer> {
-  const maxRangeBytes = 1024 * 1024;
-  if (!Number.isSafeInteger(start) || !Number.isSafeInteger(end) || start < 0 || end < start || end - start + 1 > maxRangeBytes) {
+  if (!Number.isSafeInteger(start) || !Number.isSafeInteger(end) || start < 0 || end < start || end - start + 1 > MAX_FILE_RANGE_BYTES) {
     throw new Error("Invalid or oversized file range.");
   }
   if (metadata.status !== "complete" || !Number.isSafeInteger(metadata.size) || metadata.size < 0 ||
@@ -172,48 +175,86 @@ export async function readFileRange(
   if (start >= metadata.size || metadata.size === 0) return new ArrayBuffer(0);
 
   const db = await openDB();
-  const readChunk = (chunkIndex: number): Promise<ArrayBuffer> => new Promise((resolve, reject) => {
-    const request = db.transaction(CHUNK_STORE, "readonly").objectStore(CHUNK_STORE).get([fileId, chunkIndex]);
-    request.onsuccess = () => {
-      const data = (request.result as { data?: unknown } | undefined)?.data;
-      if (data instanceof ArrayBuffer) resolve(data);
-      else reject(new Error(`File chunk ${chunkIndex} is missing or invalid.`));
-    };
-    request.onerror = () => reject(request.error);
-  });
-
   let chunkSize = metadata.chunkSize;
-  if (chunkSize !== undefined && chunkSize > maxRangeBytes) {
+  if (chunkSize !== undefined && chunkSize > MAX_FILE_RANGE_BYTES) {
     throw new Error("The file has an unsupported chunk size for range reads.");
   }
-  let firstChunk: ArrayBuffer | undefined;
   if (chunkSize === undefined) {
-    firstChunk = await readChunk(0);
+    const firstChunk = await new Promise<ArrayBuffer>((resolve, reject) => {
+      const request = db.transaction(CHUNK_STORE, "readonly").objectStore(CHUNK_STORE).get([fileId, 0]);
+      request.onsuccess = () => {
+        const data = (request.result as { data?: unknown } | undefined)?.data;
+        if (data instanceof ArrayBuffer) resolve(data);
+        else reject(new Error("File chunk 0 is missing or invalid."));
+      };
+      request.onerror = () => reject(request.error ?? new Error("Unable to read file chunk 0."));
+    });
     chunkSize = firstChunk.byteLength;
   }
-  if (!Number.isSafeInteger(chunkSize) || chunkSize < 1 || chunkSize > maxRangeBytes ||
+  if (!Number.isSafeInteger(chunkSize) || chunkSize < 1 || chunkSize > MAX_FILE_RANGE_BYTES ||
       metadata.totalChunks !== Math.ceil(metadata.size / chunkSize)) {
     throw new Error("The file has invalid chunk-size metadata.");
   }
 
   const actualEnd = Math.min(end, metadata.size - 1);
   const output = new Uint8Array(actualEnd - start + 1);
-  let outputOffset = 0;
   const firstIndex = Math.floor(start / chunkSize);
   const lastIndex = Math.floor(actualEnd / chunkSize);
-  for (let index = firstIndex; index <= lastIndex; index++) {
-    const chunk = index === 0 && firstChunk ? firstChunk : await readChunk(index);
-    const expectedSize = Math.min(chunkSize, metadata.size - index * chunkSize);
-    if (chunk.byteLength !== expectedSize) throw new Error(`File chunk ${index} has an unexpected size.`);
-    const chunkStart = index * chunkSize;
-    const copyStart = Math.max(start, chunkStart) - chunkStart;
-    const copyEnd = Math.min(actualEnd + 1, chunkStart + chunk.byteLength) - chunkStart;
-    const slice = new Uint8Array(chunk, copyStart, copyEnd - copyStart);
-    output.set(slice, outputOffset);
-    outputOffset += slice.byteLength;
-  }
-  if (outputOffset !== output.byteLength) throw new Error("The requested file range is incomplete.");
-  return output.buffer;
+  return new Promise<ArrayBuffer>((resolve, reject) => {
+    const tx = db.transaction(CHUNK_STORE, "readonly");
+    const range = IDBKeyRange.bound([fileId, firstIndex], [fileId, lastIndex]);
+    const request = tx.objectStore(CHUNK_STORE).openCursor(range);
+    let expectedIndex = firstIndex;
+    let outputOffset = 0;
+    let cursorDone = false;
+    let settled = false;
+    const fail = (error: unknown) => {
+      if (settled) return;
+      settled = true;
+      try { tx.abort(); } catch { /* The transaction may already be inactive. */ }
+      reject(error instanceof Error ? error : new Error(String(error)));
+    };
+
+    request.onsuccess = () => {
+      const cursor = request.result;
+      if (!cursor) {
+        cursorDone = true;
+        return;
+      }
+
+      const record = cursor.value as { fileId?: unknown; chunkIndex?: unknown; data?: unknown };
+      if (record.fileId !== fileId || record.chunkIndex !== expectedIndex || !(record.data instanceof ArrayBuffer)) {
+        fail(new Error(`File chunk ${expectedIndex} is missing or invalid.`));
+        return;
+      }
+      const chunkIndex = expectedIndex++;
+      const chunk = record.data;
+      const expectedSize = Math.min(chunkSize, metadata.size - chunkIndex * chunkSize);
+      if (chunk.byteLength !== expectedSize) {
+        fail(new Error(`File chunk ${chunkIndex} has an unexpected size.`));
+        return;
+      }
+      const chunkStart = chunkIndex * chunkSize;
+      const copyStart = Math.max(start, chunkStart) - chunkStart;
+      const copyEnd = Math.min(actualEnd + 1, chunkStart + chunk.byteLength) - chunkStart;
+      const slice = new Uint8Array(chunk, copyStart, copyEnd - copyStart);
+      output.set(slice, outputOffset);
+      outputOffset += slice.byteLength;
+      cursor.continue();
+    };
+    request.onerror = () => fail(request.error ?? new Error("Unable to read file chunks."));
+    tx.oncomplete = () => {
+      if (settled) return;
+      if (!cursorDone || expectedIndex <= lastIndex || outputOffset !== output.byteLength) {
+        fail(new Error("The requested file range is incomplete."));
+        return;
+      }
+      settled = true;
+      resolve(output.buffer);
+    };
+    tx.onerror = () => fail(tx.error ?? new Error("Unable to read file chunks."));
+    tx.onabort = () => fail(tx.error ?? new DOMException("File range read was aborted.", "AbortError"));
+  });
 }
 
 export const updateFileProgress = async (
@@ -293,24 +334,23 @@ export const streamFileToDownload = async (
   if (destination) {
     const writable = await destination;
     try {
-      const db = await openDB();
       let written = 0;
-      for (let i = 0; i < metadata.totalChunks; i++) {
-        const chunk = await new Promise<ArrayBuffer>((resolve, reject) => {
-          const req = db.transaction(CHUNK_STORE, 'readonly').objectStore(CHUNK_STORE).get([fileId, i]);
-          req.onsuccess = () => req.result ? resolve(req.result.data) : reject(new Error(`Missing chunk ${i}`));
-          req.onerror = () => reject(req.error);
-        });
-        await writable.write(chunk);
-        written += chunk.byteLength;
-        onProgress?.(Math.round(written / metadata.size * 100));
+      for (let start = 0; start < metadata.size; start += MAX_FILE_RANGE_BYTES) {
+        const end = Math.min(start + MAX_FILE_RANGE_BYTES, metadata.size) - 1;
+        const range = await readFileRange(fileId, metadata, start, end);
+        await writable.write(range);
+        written += range.byteLength;
+        onProgress?.(metadata.size ? Math.round(written / metadata.size * 100) : 100);
       }
       if (written !== metadata.size) throw new Error('File size mismatch');
       await writable.close();
     } catch (error) { await writable.abort(); throw error; }
     return;
   }
-  if (metadata.size > 512 * 1024 * 1024) throw new Error('For this large download, use a browser with direct-to-disk saving, such as Chrome or Edge.');
+  if (metadata.size > MAX_BLOB_DOWNLOAD_BYTES) {
+    await downloadWithServiceWorker(fileId, options.name || metadata.name, metadata.size);
+    return;
+  }
 
   const db = await openDB();
   const chunks: Blob[] = [];

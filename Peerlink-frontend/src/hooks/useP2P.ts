@@ -5,9 +5,12 @@ import type { QueuedFile, ConnectionType, ReceivingFile, ChatMessage, Settings, 
 import { generateId, getFileMimeType } from '../utils/helpers';
 import { getRandomAvatar } from '../components/avatars';
 import { createRemotePreviewUrl, MAX_PREVIEW_RANGE_BYTES, RangeBroker, type PreviewRangeRequest, type PreviewRangeResponse, waitForPreviewServiceWorker } from '../preview/RangeBroker';
+import { getRecentDiagnostics, recordTransferDiagnostic } from '../transferDiagnostics';
+
+export { getRecentDiagnostics } from '../transferDiagnostics';
 
 const STORAGE_KEY = 'peerlink_settings';
-const ICE_SERVERS = [
+const DEFAULT_ICE_SERVERS: RTCIceServer[] = [
     { urls: 'stun:stun.l.google.com:19302' },
     { urls: [
         'turn:openrelay.metered.ca:80',
@@ -15,15 +18,50 @@ const ICE_SERVERS = [
         'turn:openrelay.metered.ca:443?transport=tcp',
     ], username: 'openrelayproject', credential: 'openrelayproject' },
 ];
+function safeIceServers(): RTCIceServer[] {
+    const raw = (import.meta.env as Record<string, unknown>).VITE_ICE_SERVERS;
+    if (typeof raw !== 'string' || !raw.trim()) return DEFAULT_ICE_SERVERS;
+    try {
+        const parsed: unknown = JSON.parse(raw);
+        if (!Array.isArray(parsed) || parsed.length > 8) throw new Error('Expected an array with at most eight ICE servers.');
+        const servers: RTCIceServer[] = parsed.map((value, index) => {
+            if (!value || typeof value !== 'object') throw new Error(`ICE server ${index + 1} is invalid.`);
+            const candidate = value as Record<string, unknown>;
+            const urls = typeof candidate.urls === 'string' ? [candidate.urls] : candidate.urls;
+            if (!Array.isArray(urls) || urls.length < 1 || urls.length > 8 || urls.some(url => typeof url !== 'string' ||
+                url.length > 512 || !/^(stun|stuns|turn|turns):/i.test(url))) throw new Error(`ICE server ${index + 1} has invalid URLs.`);
+            if (candidate.username !== undefined && (typeof candidate.username !== 'string' || candidate.username.length > 512)) {
+                throw new Error(`ICE server ${index + 1} has an invalid username.`);
+            }
+            if (candidate.credential !== undefined && (typeof candidate.credential !== 'string' || candidate.credential.length > 2048)) {
+                throw new Error(`ICE server ${index + 1} has an invalid credential.`);
+            }
+            return { urls: urls as string[], ...(typeof candidate.username === 'string' ? { username: candidate.username } : {}),
+                ...(typeof candidate.credential === 'string' ? { credential: candidate.credential } : {}) };
+        });
+        if (!servers.length) throw new Error('At least one ICE server is required.');
+        return servers;
+    } catch {
+        recordTransferDiagnostic('ice_server_override', 'invalid_override_fallback');
+        return DEFAULT_ICE_SERVERS;
+    }
+}
+const ICE_SERVERS = safeIceServers();
 const CATALOG_FILES_PER_MESSAGE = 16;
+const MAX_CATALOG_FILES = 10_000;
 const MAX_CATALOG_MESSAGES = 10_000;
+const MAX_CONTROL_MESSAGE_BYTES = 16 * 1024;
+const CONTROL_BUFFER_HIGH_WATER = 256 * 1024;
+const MAX_AUTO_DOWNLOAD_BYTES = 10 * 1024 * 1024;
+const MAX_PENDING_AUTO_DOWNLOADS = 10;
+const ICE_DISCONNECT_GRACE_MS = 10_000;
 const MAX_PENDING_ICE_CANDIDATES = 256;
 const MAX_PREVIEW_REQUESTS = 8;
 const PREVIEW_REQUEST_TIMEOUT_MS = 22_000;
 const PREVIEW_BUFFER_HIGH_WATER = 512 * 1024;
 const SIGNALING_HEARTBEAT_INTERVAL_MS = 25_000;
 const RECONNECT_DELAYS_MS = [1_000, 5_000, 15_000] as const;
-const NEGOTIATION_TIMEOUT_MS = 25_000;
+const NEGOTIATION_TIMEOUT_MS = 45_000;
 const previewFrameEncoder = new TextEncoder();
 const previewFrameDecoder = new TextDecoder();
 const MIME_TYPE_PATTERN = /^[\w!#$&^_.+-]+\/[\w!#$&^_.+-]+(?:\s*;\s*[\w!#$&^_.+-]+=(?:"[^"\r\n]*"|[\w!#$&^_.+-]+))*$/;
@@ -81,7 +119,9 @@ type PeerSession = {
     status: PeerMember['status'];
     connectionType: ConnectionType;
     initialNegotiationTimer?: number;
+    iceDisconnectTimer?: number;
     outgoingCatalogRevision: number;
+    catalogSendChain: Promise<void>;
     incomingCatalogRevision: number;
     incomingCatalog: CatalogSnapshot | null;
     sharedSources: Map<string, SharedSource>;
@@ -94,10 +134,41 @@ type PeerSession = {
     dispose?: (retry?: boolean) => void;
 };
 
+function sendControlMessage(session: PeerSession, value: object): void {
+    const channel = session.control;
+    if (!channel || channel.readyState !== 'open') throw new Error('The peer control channel is closed.');
+    channel.send(encodeControlMessage(session.pc, value));
+}
+
 function safeMimeType(value: string): string {
     if (value.length > 255 || !MIME_TYPE_PATTERN.test(value)) return 'application/octet-stream';
     const essence = value.split(';', 1)[0].trim().toLowerCase();
     return essence === 'text/html' || essence === 'application/xhtml+xml' ? 'text/plain' : value;
+}
+
+function controlMessageLimit(peer: RTCPeerConnection | null | undefined): number {
+    const negotiated = peer?.sctp?.maxMessageSize;
+    return typeof negotiated === 'number' && negotiated > 0
+        ? Math.min(MAX_CONTROL_MESSAGE_BYTES, negotiated)
+        : MAX_CONTROL_MESSAGE_BYTES;
+}
+
+function encodeControlMessage(peer: RTCPeerConnection | null | undefined, value: object): string {
+    const text = JSON.stringify(value);
+    if (previewFrameEncoder.encode(text).byteLength > controlMessageLimit(peer)) {
+        throw new Error('This control message is too large for the current connection.');
+    }
+    return text;
+}
+
+function iceServerHostnames(servers: RTCIceServer[]): string[] {
+    return [...new Set(servers.flatMap(server => {
+        const urls = typeof server.urls === 'string' ? [server.urls] : server.urls || [];
+        return urls.flatMap(url => {
+            const match = /^(?:stun|stuns|turn|turns):(?:\/\/)?(?:[^@/]*@)?(\[[^\]]+\]|[^:/?]+)/i.exec(url);
+            return match ? [match[1].slice(0, 255)] : [];
+        });
+    }))].slice(0, 16);
 }
 
 function safeCatalogEntry(value: unknown): FileMetadata | null {
@@ -216,7 +287,7 @@ export function useP2P() {
     const [selfPeerId, setSelfPeerId] = useState('');
     const [members, setMembers] = useState<PeerMember[]>([]);
     const [selectedPeerIds, setSelectedPeerIdsState] = useState<string[]>([]);
-    const [currentReceivings, setCurrentReceivings] = useState<ReceivingFile[]>([]);
+    const [currentReceivings, setCurrentReceivingsState] = useState<ReceivingFile[]>([]);
     const [inRoom, setInRoom] = useState(false);
     const [hasPeer, setHasPeer] = useState(false);
     const [signalingStatus, setSignalingStatus] = useState<SignalingStatus>('idle');
@@ -234,6 +305,7 @@ export function useP2P() {
     const [isSettingsOpen, setIsSettingsOpen] = useState(false);
     const [toast, setToast] = useState<{ message: string; kind: 'success' | 'error' | 'info' } | null>(null);
     const queue = useRef<QueuedFile[]>([]);
+    const currentReceivingsRef = useRef<ReceivingFile[]>([]);
     // A room owns one signaling socket and one independent session per remote peer.
     const sessions = useRef(new Map<string, PeerSession>());
     const roomMembers = useRef(new Map<string, PeerMember>());
@@ -273,6 +345,9 @@ export function useP2P() {
     const seenChatMessages = useRef(new Set<string>());
     const options = useRef(settings);
     const toastTimer = useRef<number | undefined>(undefined);
+    const autoDownloadQueue = useRef<string[]>([]);
+    const autoDownloadQueued = useRef(new Set<string>());
+    const autoDownloadActive = useRef(false);
     const receivedFilesRef = useRef<FileMetadata[]>([]);
     const onlineFilesRef = useRef<FileMetadata[]>([]);
     const publishCatalogRef = useRef<() => void>(() => undefined);
@@ -281,6 +356,11 @@ export function useP2P() {
     options.current = settings;
     identityRef.current = username;
     chatOpen.current = isChatOpen;
+
+    const updateCurrentReceivings = (update: (files: ReceivingFile[]) => ReceivingFile[]) => {
+        currentReceivingsRef.current = update(currentReceivingsRef.current);
+        if (live.current) setCurrentReceivingsState(currentReceivingsRef.current);
+    };
 
     // React may defer/replay updater callbacks. Keep protocol state outside them.
     const changeQueue = useCallback((update: (files: QueuedFile[]) => QueuedFile[], publishCatalog = false) => {
@@ -303,6 +383,37 @@ export function useP2P() {
         setToast({ message, kind });
         toastTimer.current = window.setTimeout(() => setToast(null), 4500);
     }, []);
+    const queueAutomaticDownload = useCallback((metadata: FileMetadata) => {
+        if (metadata.size > MAX_AUTO_DOWNLOAD_BYTES) {
+            showToast(`“${metadata.name}” is ready. Download large files from Received files.`, 'info');
+            return;
+        }
+        if (autoDownloadQueued.current.has(metadata.fileId)) return;
+        if (autoDownloadQueue.current.length + Number(autoDownloadActive.current) >= MAX_PENDING_AUTO_DOWNLOADS) {
+            showToast('Automatic downloads are backed up. Download this file from Received files.', 'info');
+            return;
+        }
+        autoDownloadQueued.current.add(metadata.fileId);
+        autoDownloadQueue.current.push(metadata.fileId);
+        if (autoDownloadActive.current) return;
+        autoDownloadActive.current = true;
+        void (async () => {
+            while (live.current && autoDownloadQueue.current.length) {
+                const fileId = autoDownloadQueue.current.shift()!;
+                try {
+                    await streamFileToDownload(fileId, undefined, { picker: false });
+                } catch (error) {
+                    if (!(error instanceof DOMException && error.name === 'AbortError')) {
+                        showToast('Automatic download could not start. Use Download in Received files.', 'info');
+                    }
+                } finally {
+                    autoDownloadQueued.current.delete(fileId);
+                }
+                if (live.current && autoDownloadQueue.current.length) await new Promise(resolve => window.setTimeout(resolve, 1200));
+            }
+            autoDownloadActive.current = false;
+        })();
+    }, [showToast]);
 
     const setSelectedPeerIds = useCallback((next: string[] | ((current: string[]) => string[])) => {
         const value = typeof next === 'function' ? next(selectedPeerIdsRef.current) : next;
@@ -316,9 +427,9 @@ export function useP2P() {
         pendingRemoteRanges.current.delete(requestId);
         window.clearTimeout(pending.timer);
         pending.signal.removeEventListener('abort', pending.abort);
-        const commands = sessions.current.get(pending.peerId)?.control;
-        if (notifyPeer && commands?.readyState === 'open') {
-            try { commands.send(JSON.stringify({ type: 'preview_range_cancel', requestId })); } catch { /* The peer is already leaving. */ }
+        const session = sessions.current.get(pending.peerId);
+        if (notifyPeer && session?.control?.readyState === 'open') {
+            try { sendControlMessage(session, { type: 'preview_range_cancel', requestId }); } catch { /* The peer is already leaving. */ }
         }
         if (error) pending.reject(error);
         else if (response) pending.resolve(response);
@@ -357,9 +468,8 @@ export function useP2P() {
             }
             void waitForDataChannel(preview, signal, 5_000).then(() => {
                 if (!pendingRemoteRanges.current.has(request.requestId)) return;
-                const commands = session.control;
-                if (commands?.readyState !== 'open' || sessions.current.get(peerId) !== session) throw new Error('The peer is disconnected.');
-                commands.send(JSON.stringify({ type: 'preview_range_request', ...request, fileId: remoteFileId }));
+                if (session.control?.readyState !== 'open' || sessions.current.get(peerId) !== session) throw new Error('The peer is disconnected.');
+                sendControlMessage(session, { type: 'preview_range_request', ...request, fileId: remoteFileId });
             }).catch(error => {
                 settleRemoteRange(request.requestId, null, error instanceof Error ? error : new Error(String(error)), false);
             });
@@ -465,10 +575,10 @@ export function useP2P() {
         if (!isValidRangeEnvelope(requestId, fileId, start, end) || !commands || commands.readyState !== 'open') return;
         const key = requestId as string;
         if (session.pendingHostRanges.has(key) || session.pendingHostRanges.size >= MAX_PREVIEW_REQUESTS) {
-            commands.send(JSON.stringify({ type: 'preview_range_error', requestId: key, message: 'Too many preview requests.' })); return;
+            sendControlMessage(session, { type: 'preview_range_error', requestId: key, message: 'Too many preview requests.' }); return;
         }
         const source = session.sharedSources.get(fileId as string);
-        if (!source) { commands.send(JSON.stringify({ type: 'preview_range_error', requestId: key, message: 'This file is no longer shared.' })); return; }
+        if (!source) { sendControlMessage(session, { type: 'preview_range_error', requestId: key, message: 'This file is no longer shared.' }); return; }
         const controller = new AbortController(); session.pendingHostRanges.set(key, controller);
         try {
             const actualEnd = Math.min(end as number, source.metadata.size - 1);
@@ -483,7 +593,7 @@ export function useP2P() {
             session.previewSendChain = sending.catch(() => undefined); await sending;
         } catch (error) {
             if (!controller.signal.aborted && session.control?.readyState === 'open') {
-                try { session.control.send(JSON.stringify({ type: 'preview_range_error', requestId: key, message: error instanceof Error ? error.message.slice(0, 512) : 'Unable to serve preview range.' })); } catch { /* Peer left. */ }
+                try { sendControlMessage(session, { type: 'preview_range_error', requestId: key, message: error instanceof Error ? error.message.slice(0, 512) : 'Unable to serve preview range.' }); } catch { /* Peer left. */ }
             }
         } finally { if (session.pendingHostRanges.get(key) === controller) session.pendingHostRanges.delete(key); }
     }, [sendPreviewFrames]);
@@ -496,7 +606,7 @@ export function useP2P() {
         for (const session of [...sessions.current.values()]) session.dispose?.(false);
         replaceOnlineFiles([]);
         if (live.current) {
-            setConnected(false); setConnectionType('disconnected'); setCurrentReceiving(null); setCurrentReceivings([]);
+            setConnected(false); setConnectionType('disconnected'); setCurrentReceiving(null); updateCurrentReceivings(() => []);
         }
     }, [replaceOnlineFiles, settleRemoteRange]);
     useEffect(() => {
@@ -506,6 +616,8 @@ export function useP2P() {
         previewBroker.current = broker;
         return () => {
             live.current = false;
+            autoDownloadQueue.current = [];
+            autoDownloadQueued.current.clear();
             clearTimeout(toastTimer.current);
             broker.dispose();
             clearSignalingMonitor.current();
@@ -546,14 +658,63 @@ export function useP2P() {
         const files = [...sources.values()].map(source => source.metadata);
         const fingerprint = JSON.stringify(files.map(file => [file.fileId, file.name, file.path || '', file.size, file.mimeType, file.totalChunks, file.chunkSize || 0]));
         if (!force && fingerprint === session.lastCatalogFingerprint) return;
-        const chunkCount = Math.max(1, Math.ceil(files.length / CATALOG_FILES_PER_MESSAGE));
-        if (chunkCount > MAX_CATALOG_MESSAGES) return;
-        const revision = ++session.outgoingCatalogRevision;
-        for (let index = 0; index < chunkCount; index++) {
-            session.control.send(JSON.stringify({ type: 'catalog_snapshot', revision, index, chunkCount,
-                files: files.slice(index * CATALOG_FILES_PER_MESSAGE, (index + 1) * CATALOG_FILES_PER_MESSAGE) }));
+        const reportCatalogFailure = (code: string, message: string) => {
+            recordTransferDiagnostic('catalog_publish', code);
+            try { session.control?.send(encodeControlMessage(session.pc, { type: 'catalog_error', message })); } catch { /* Peer may have left. */ }
+        };
+        if (files.length > MAX_CATALOG_FILES) {
+            reportCatalogFailure('catalog_too_large', 'This shared catalog exceeds the 10,000 file limit.');
+            return;
         }
+        const revision = session.outgoingCatalogRevision + 1;
+        const limit = controlMessageLimit(session.pc);
+        const groups: FileMetadata[][] = [];
+        let current: FileMetadata[] = [];
+        const candidateFits = (candidate: FileMetadata[]) => previewFrameEncoder.encode(JSON.stringify({ type: 'catalog_snapshot',
+            revision, index: MAX_CATALOG_MESSAGES - 1, chunkCount: MAX_CATALOG_MESSAGES, files: candidate })).byteLength <= limit;
+        for (const file of files) {
+            const candidate = [...current, file];
+            if (candidate.length <= CATALOG_FILES_PER_MESSAGE && candidateFits(candidate)) {
+                current = candidate;
+                continue;
+            }
+            if (!current.length) {
+                reportCatalogFailure('catalog_entry_too_large', 'A shared file entry exceeds the control message size limit.');
+                return;
+            }
+            groups.push(current);
+            current = [file];
+            if (!candidateFits(current)) {
+                reportCatalogFailure('catalog_entry_too_large', 'A shared file entry exceeds the control message size limit.');
+                return;
+            }
+        }
+        if (current.length || !groups.length) groups.push(current);
+        if (groups.length > MAX_CATALOG_MESSAGES) {
+            reportCatalogFailure('catalog_too_large', 'This shared catalog exceeds the message count limit.');
+            return;
+        }
+        const chunkCount = groups.length;
+        session.outgoingCatalogRevision = revision;
         session.lastCatalogFingerprint = fingerprint;
+        const publish = async () => {
+            for (let index = 0; index < groups.length; index++) {
+                const control = session.control;
+                if (sessions.current.get(session.peerId) !== session || control?.readyState !== 'open' ||
+                    session.outgoingCatalogRevision !== revision) return;
+                const text = encodeControlMessage(session.pc, { type: 'catalog_snapshot', revision, index, chunkCount, files: groups[index] });
+                while (control.bufferedAmount + previewFrameEncoder.encode(text).byteLength > CONTROL_BUFFER_HIGH_WATER) {
+                    if (sessions.current.get(session.peerId) !== session || control.readyState !== 'open' ||
+                        session.outgoingCatalogRevision !== revision) return;
+                    await new Promise(resolve => window.setTimeout(resolve, 50));
+                }
+                control.send(text);
+            }
+        };
+        session.catalogSendChain = session.catalogSendChain.catch(() => undefined).then(publish).catch(() => {
+            if (session.outgoingCatalogRevision === revision) session.lastCatalogFingerprint = '';
+            recordTransferDiagnostic('catalog_publish', 'send_failed');
+        });
     };
 
     const publishAllSessionCatalogs = () => { for (const session of sessions.current.values()) publishSessionCatalog(session); };
@@ -587,7 +748,7 @@ export function useP2P() {
         }
         changeQueue(items => items.map(item => ({ ...item, recipients: item.recipients.map(recipient => recipient.peerId === peerId
             ? { ...recipient, peerName: name } : recipient) })));
-        setCurrentReceivings(current => current.map(item => item.peerId === peerId ? { ...item, peerName: name } : item));
+        updateCurrentReceivings(current => current.map(item => item.peerId === peerId ? { ...item, peerName: name } : item));
         setCurrentReceiving(current => current?.peerId === peerId ? { ...current, peerName: name } : current);
     };
     const updateMember = (session: PeerSession, status: PeerMember['status'], connection: ConnectionType = session.connectionType) => {
@@ -600,22 +761,34 @@ export function useP2P() {
         setConnected(liveSessions.length > 0);
         setConnectionType(liveSessions.length ? (liveSessions.some(item => item.connectionType === 'relay') ? 'relay' : 'p2p') : 'disconnected');
     };
-    const acceptSessionCatalog = (session: PeerSession, message: Record<string, unknown>) => {
+    const acceptSessionCatalog = (session: PeerSession, message: Record<string, unknown>): string | null => {
         const { revision, index, chunkCount, files } = message;
-        if (!Number.isSafeInteger(revision) || Number(revision) < session.incomingCatalogRevision + 1 || !Number.isSafeInteger(index) ||
+        if (!Number.isSafeInteger(revision) || Number(revision) < 1 || !Number.isSafeInteger(index) ||
             !Number.isSafeInteger(chunkCount) || Number(chunkCount) < 1 || Number(chunkCount) > MAX_CATALOG_MESSAGES ||
-            Number(index) < 0 || Number(index) >= Number(chunkCount) || !Array.isArray(files) || files.length > CATALOG_FILES_PER_MESSAGE) return;
+            Number(index) < 0 || Number(index) >= Number(chunkCount) || !Array.isArray(files) || files.length > CATALOG_FILES_PER_MESSAGE) {
+            return 'Peer sent an invalid shared file list.';
+        }
+        if (Number(revision) < session.incomingCatalogRevision + 1) return null;
         if (!session.incomingCatalog || session.incomingCatalog.revision !== Number(revision)) {
             session.incomingCatalog = { revision: Number(revision), chunkCount: Number(chunkCount), chunks: new Map() };
         }
         const snapshot = session.incomingCatalog;
-        if (snapshot.chunkCount !== Number(chunkCount) || snapshot.chunks.has(Number(index))) return;
+        if (snapshot.chunkCount !== Number(chunkCount)) {
+            session.incomingCatalog = null;
+            return 'Peer sent an inconsistent shared file list.';
+        }
+        if (snapshot.chunks.has(Number(index))) return null;
         const chunk: FileMetadata[] = [];
-        for (const entry of files) { const value = safeCatalogEntry(entry); if (!value) return; chunk.push(value); }
+        for (const entry of files) {
+            const value = safeCatalogEntry(entry);
+            if (!value) { session.incomingCatalog = null; return 'Peer sent an invalid file entry in its shared file list.'; }
+            chunk.push(value);
+        }
         snapshot.chunks.set(Number(index), chunk);
-        if (snapshot.chunks.size !== snapshot.chunkCount) return;
+        if (snapshot.chunks.size !== snapshot.chunkCount) return null;
         const unique = new Map<string, FileMetadata>();
         for (let i = 0; i < snapshot.chunkCount; i++) for (const file of snapshot.chunks.get(i) || []) if (!unique.has(file.fileId)) unique.set(file.fileId, file);
+        if (unique.size > MAX_CATALOG_FILES) { session.incomingCatalog = null; return 'Peer shared more than 10,000 files.'; }
         session.incomingCatalogRevision = snapshot.revision; session.incomingCatalog = null;
         session.remoteFilesByAlias.clear();
         for (const [remoteFileId, metadata] of unique) {
@@ -625,6 +798,7 @@ export function useP2P() {
             session.remoteFilesByAlias.set(alias, remote);
         }
         refreshGroupOnlineFiles();
+        return null;
     };
     function scheduleRecipientTransfers() {
         if (!live.current) return;
@@ -638,25 +812,45 @@ export function useP2P() {
                 const key = `${file.id}:${recipient.peerId}`;
                 activeRecipientTransfers.current.add(key);
                 const sharedWithRoom = false;
+                const sendingStartedAt = Date.now();
                 changeQueue(items => items.map(item => item.id !== file.id ? item : {
-                    ...item, status: 'sending', startTime: item.startTime || Date.now(), recipients: item.recipients.map(value => value.peerId === recipient.peerId
-                        ? { ...value, status: 'sending', startTime: Date.now(), progress: 0, bytesTransferred: 0 } : value),
+                    ...item, status: 'sending', startTime: item.startTime || sendingStartedAt, pausedAt: undefined,
+                    recipients: item.recipients.map(value => value.peerId === recipient.peerId
+                        ? { ...value, status: 'sending', startTime: value.startTime || sendingStartedAt, pausedAt: undefined,
+                            activeElapsedMs: value.activeElapsedMs || 0 } : value),
                 }));
                 void session.engine.send(file.file, file.id, bytes => {
                     syncAggregateMetrics();
-                    changeQueue(items => items.map(item => item.id !== file.id ? item : {
-                        ...item, bytesTransferred: bytes, progress: file.file.size ? Math.min(99, Math.floor(bytes / file.file.size * 100)) : 0,
-                        recipients: item.recipients.map(value => value.peerId === recipient.peerId ? { ...value, bytesTransferred: bytes,
-                            progress: file.file.size ? Math.min(99, Math.floor(bytes / file.file.size * 100)) : 0 } : value),
+                    const now = Date.now();
+                    changeQueue(items => items.map(item => {
+                        if (item.id !== file.id) return item;
+                        const recipients = item.recipients.map(value => {
+                            if (value.peerId !== recipient.peerId) return value;
+                            const elapsed = Math.max(0, now - (value.startTime || now) - (value.pausedMs || 0));
+                            const elapsedDelta = elapsed - (value.activeElapsedMs || 0);
+                            const byteDelta = bytes - value.bytesTransferred;
+                            const speed = elapsedDelta > 0 ? Math.max(0, byteDelta * 1000 / elapsedDelta) : value.speedBytesPerSecond || 0;
+                            return { ...value, bytesTransferred: bytes,
+                                progress: file.file.size ? Math.min(99, Math.floor(bytes / file.file.size * 100)) : 0,
+                                activeElapsedMs: elapsed, speedBytesPerSecond: speed };
+                        });
+                        const activeRecipient = recipients.find(value => value.peerId === recipient.peerId)!;
+                        return { ...item, bytesTransferred: bytes, progress: file.file.size ? Math.min(99, Math.floor(bytes / file.file.size * 100)) : 0,
+                            activeElapsedMs: activeRecipient.activeElapsedMs, speedBytesPerSecond: activeRecipient.speedBytesPerSecond, recipients };
                     }));
                 }, true, sharedWithRoom).then(() => {
                     changeQueue(items => items.map(item => item.id !== file.id ? item : {
                         ...item, recipients: item.recipients.map(value => value.peerId === recipient.peerId
-                            ? { ...value, status: 'sent', progress: 100, bytesTransferred: file.file.size } : value),
+                            ? { ...value, status: 'sent', progress: 100, bytesTransferred: file.file.size, pausedAt: undefined,
+                                activeElapsedMs: value.startTime ? Math.max(value.activeElapsedMs || 0, Date.now() - value.startTime - (value.pausedMs || 0)) : value.activeElapsedMs,
+                                speedBytesPerSecond: 0, error: undefined } : value), error: undefined,
                     }));
                 }).catch(error => {
+                    const errorMessage = (error instanceof Error ? error.message : String(error)).slice(0, 512);
+                    recordTransferDiagnostic('transfer_error', 'send_failed');
                     changeQueue(items => items.map(item => item.id !== file.id ? item : {
-                        ...item, recipients: item.recipients.map(value => value.peerId === recipient.peerId ? { ...value, status: 'failed' } : value),
+                        ...item, error: errorMessage, recipients: item.recipients.map(value => value.peerId === recipient.peerId
+                            ? { ...value, status: 'failed', error: errorMessage, pausedAt: undefined, speedBytesPerSecond: 0 } : value),
                     }));
                     if (live.current) showToast(`${recipient.peerName}: ${error instanceof Error ? error.message : String(error)}`);
                 }).finally(() => {
@@ -685,6 +879,7 @@ export function useP2P() {
             generation: crypto.randomUUID(), pc: null, engine: null, control: null, data: null, preview: null,
             candidates: [], remoteCandidateChain: Promise.resolve(), pendingRemoteCandidateCount: 0,
             status: 'connecting', connectionType: 'disconnected', outgoingCatalogRevision: 0, incomingCatalogRevision: 0,
+            catalogSendChain: Promise.resolve(),
             incomingCatalog: null, sharedSources: new Map(), lastCatalogFingerprint: '', aliasesByRemoteId: new Map(), remoteFilesByAlias: new Map(),
             pendingHostRanges: new Map(), previewSendChain: Promise.resolve(), receiveClock: { id: '', start: 0, update: 0 } };
         sessions.current.set(session.peerId, session);
@@ -693,17 +888,30 @@ export function useP2P() {
             ? current.map(item => item.peerId === member.peerId ? { ...item, ...member, connectionType: 'disconnected', status: 'connecting' } : item)
             : [...current, { ...member, connectionType: 'disconnected', status: 'connecting' }]);
         const peer = new RTCPeerConnection({ iceServers: ICE_SERVERS }); session.pc = peer;
+        recordTransferDiagnostic('peer_connection_created', undefined, {
+            serverCount: ICE_SERVERS.length,
+            serverHostnames: iceServerHostnames(ICE_SERVERS).join(', ').slice(0, 512),
+            maxMessageSize: peer.sctp?.maxMessageSize ?? null,
+            connectionState: peer.connectionState, iceConnectionState: peer.iceConnectionState,
+            iceGatheringState: peer.iceGatheringState,
+        });
         const commands = peer.createDataChannel('control', { negotiated: true, id: 0, ordered: true });
         const chunks = peer.createDataChannel('data', { negotiated: true, id: 1, ordered: true });
         const previews = peer.createDataChannel('preview', { negotiated: true, id: 2, ordered: true });
         session.control = commands; session.data = chunks; session.preview = previews;
+        commands.bufferedAmountLowThreshold = CONTROL_BUFFER_HIGH_WATER / 2;
         previews.binaryType = 'arraybuffer'; previews.bufferedAmountLowThreshold = PREVIEW_BUFFER_HIGH_WATER / 2;
-        const closeSession = (retry = true) => {
+        const closeSession = (retry = true, reason = 'transport_closed') => {
             if (sessions.current.get(session.peerId) !== session) return;
             if (session.initialNegotiationTimer !== undefined) {
                 window.clearTimeout(session.initialNegotiationTimer);
                 session.initialNegotiationTimer = undefined;
             }
+            if (session.iceDisconnectTimer !== undefined) {
+                window.clearTimeout(session.iceDisconnectTimer);
+                session.iceDisconnectTimer = undefined;
+            }
+            recordTransferDiagnostic('peer_session_closed', reason, { retry });
             for (const [id, pending] of pendingRemoteRanges.current) if (pending.peerId === session.peerId) settleRemoteRange(id, null, new Error('Peer disconnected.'), false);
             for (const controller of session.pendingHostRanges.values()) controller.abort('Peer disconnected');
             session.pendingHostRanges.clear();
@@ -721,7 +929,7 @@ export function useP2P() {
                 if (member) roomMembers.current.set(session.peerId, { ...member, status: 'disconnected', connectionType: 'disconnected' });
                 setMembers(current => current.map(item => item.peerId === session.peerId
                     ? { ...item, status: 'disconnected', connectionType: 'disconnected' } : item));
-                setCurrentReceivings(current => current.filter(item => item.peerId !== session.peerId));
+                updateCurrentReceivings(current => current.filter(item => item.peerId !== session.peerId));
                 setCurrentReceiving(current => current?.peerId === session.peerId ? null : current);
             }
             refreshGroupOnlineFiles();
@@ -737,11 +945,16 @@ export function useP2P() {
         if (!linkId) {
             session.initialNegotiationTimer = window.setTimeout(() => {
                 session.initialNegotiationTimer = undefined;
-                if (sessions.current.get(session.peerId) !== session || session.status === 'connected' || peer.remoteDescription) return;
+                if (sessions.current.get(session.peerId) !== session || session.status === 'connected' ||
+                    commands.readyState === 'open' && chunks.readyState === 'open') return;
+                recordTransferDiagnostic('initial_connection_deadline', 'channel_open_timeout', {
+                    connectionState: peer.connectionState, iceConnectionState: peer.iceConnectionState,
+                    signalingState: peer.signalingState,
+                });
                 showToast(session.supportsReconnect
                     ? `Signaling with ${session.username} timed out. Retrying the negotiation.`
                     : `Signaling with ${session.username} timed out. Retry the room connection.`, 'info');
-                session.dispose?.(true);
+                closeSession(true, 'initial_channel_timeout');
             }, NEGOTIATION_TIMEOUT_MS);
         }
         previews.onmessage = event => {
@@ -760,23 +973,42 @@ export function useP2P() {
                 clock.update = Date.now();
                 const receiving: ReceivingFile = { fileId: meta.fileId,
                     peerId: session.peerId, peerName: session.username, name: meta.name, size: meta.size, startTime: clock.start, bytesReceived: bytes,
-                    progress: meta.size ? Math.min(99, Math.floor(bytes / meta.size * 100)) : 0 };
-                setCurrentReceivings(current => [...current.filter(item => item.fileId !== meta.fileId), receiving]);
+                    progress: meta.size ? Math.min(99, Math.floor(bytes / meta.size * 100)) : 0, status: 'receiving' };
+                updateCurrentReceivings(current => [...current.filter(item => item.peerId !== session.peerId), receiving]);
                 setCurrentReceiving(receiving);
             },
             received: meta => {
                 if (!live.current) return;
                 replaceReceivedFiles([...receivedFilesRef.current.filter(file => file.fileId !== meta.fileId), meta]);
-                setCurrentReceivings(current => current.filter(item => item.peerId !== session.peerId));
+                updateCurrentReceivings(current => current.filter(item => item.peerId !== session.peerId));
                 setCurrentReceiving(current => current?.fileId === meta.fileId ? null : current);
                 publishAllSessionCatalogs();
-                if (options.current.autoDownload) void streamFileToDownload(meta.fileId, undefined, { picker: false }).catch(error => showToast(String(error)));
+                if (options.current.autoDownload) queueAutomaticDownload(meta);
             },
-            error: message => { setCurrentReceivings(current => current.filter(item => item.peerId !== session.peerId)); setCurrentReceiving(null); showToast(`${session.username}: ${message}`); },
-        }, () => temporary.current ? 'temporary' : 'persistent', { peerId: session.peerId, peerName: session.username });
+            cancelled: meta => {
+                updateCurrentReceivings(current => current.filter(item => item.fileId !== meta.fileId));
+                setCurrentReceiving(current => current?.fileId === meta.fileId ? null : current);
+                if (session.receiveClock.id === meta.fileId) session.receiveClock = { id: '', start: 0, update: 0 };
+                recordTransferDiagnostic('transfer_cancelled', 'receiver_cancelled');
+            },
+            error: message => {
+                recordTransferDiagnostic('transfer_error', 'receive_failed');
+                const failure: ReceivingFile = {
+                    ...(currentReceivingsRef.current.find(item => item.peerId === session.peerId) || {
+                        fileId: crypto.randomUUID(), peerId: session.peerId, peerName: session.username, name: 'Receive failed',
+                        size: 0, startTime: Date.now(), bytesReceived: 0, progress: 0,
+                    }),
+                    status: 'failed', error: message.slice(0, 512),
+                };
+                updateCurrentReceivings(current => [...current.filter(item => item.peerId !== session.peerId), failure]);
+                setCurrentReceiving(failure); showToast(`${session.username}: ${message}`);
+            },
+        }, () => temporary.current ? 'temporary' : 'persistent', { peerId: session.peerId, peerName: session.username },
+        { getMaxMessageSize: () => peer.sctp?.maxMessageSize });
         transferEngines.current.add(session.engine);
         const opened = () => {
             if (sessions.current.get(session.peerId) !== session || commands.readyState !== 'open' || chunks.readyState !== 'open') return;
+            recordTransferDiagnostic('data_channels_open', undefined, { control: commands.readyState, data: chunks.readyState });
             if (session.initialNegotiationTimer !== undefined) {
                 window.clearTimeout(session.initialNegotiationTimer);
                 session.initialNegotiationTimer = undefined;
@@ -793,12 +1025,68 @@ export function useP2P() {
             }).catch(() => undefined);
         };
         commands.onopen = opened; chunks.onopen = opened;
-        commands.onclose = () => closeSession(true); chunks.onclose = () => closeSession(true); previews.onclose = () => closeSession(true);
-        peer.onconnectionstatechange = () => { if (peer.connectionState === 'failed' || peer.connectionState === 'closed') closeSession(); };
+        commands.onclose = () => { recordTransferDiagnostic('data_channel_state', 'control_closed'); closeSession(true, 'control_channel_closed'); };
+        chunks.onclose = () => { recordTransferDiagnostic('data_channel_state', 'data_closed'); closeSession(true, 'data_channel_closed'); };
+        previews.onclose = () => { recordTransferDiagnostic('data_channel_state', 'preview_closed'); closeSession(true, 'preview_channel_closed'); };
+        commands.onerror = () => recordTransferDiagnostic('data_channel_error', 'control_error');
+        chunks.onerror = () => recordTransferDiagnostic('data_channel_error', 'data_error');
+        previews.onerror = () => recordTransferDiagnostic('data_channel_error', 'preview_error');
+        peer.oniceconnectionstatechange = () => {
+            recordTransferDiagnostic('ice_connection_state', peer.iceConnectionState);
+            if (peer.iceConnectionState === 'connected' || peer.iceConnectionState === 'completed') {
+                if (session.iceDisconnectTimer !== undefined) window.clearTimeout(session.iceDisconnectTimer);
+                session.iceDisconnectTimer = undefined;
+            } else if (peer.iceConnectionState === 'disconnected' && session.iceDisconnectTimer === undefined) {
+                session.iceDisconnectTimer = window.setTimeout(() => {
+                    session.iceDisconnectTimer = undefined;
+                    if (sessions.current.get(session.peerId) === session && peer.iceConnectionState === 'disconnected') {
+                        closeSession(true, 'ice_disconnected_timeout');
+                    }
+                }, ICE_DISCONNECT_GRACE_MS);
+            } else if (peer.iceConnectionState === 'failed') closeSession(true, 'ice_failed');
+        };
+        peer.onicegatheringstatechange = () => recordTransferDiagnostic('ice_gathering_state', peer.iceGatheringState);
+        peer.addEventListener('icecandidateerror', event => {
+            const failure = event as RTCPeerConnectionIceErrorEvent;
+            let serverHostname: string | null = null;
+            if (typeof failure.url === 'string') serverHostname = iceServerHostnames([{ urls: failure.url }])[0] || null;
+            recordTransferDiagnostic('ice_candidate_error', 'ice_server_error', {
+                errorCode: Number.isSafeInteger(failure.errorCode) ? failure.errorCode : null,
+                serverHostname,
+            });
+        });
+        peer.onconnectionstatechange = () => {
+            recordTransferDiagnostic('peer_connection_state', peer.connectionState);
+            if (peer.connectionState === 'failed' || peer.connectionState === 'closed') closeSession(true, `connection_${peer.connectionState}`);
+        };
         commands.onmessage = ({ data: text }) => {
+            if (typeof text !== 'string') {
+                recordTransferDiagnostic('control_message', 'non_text_frame');
+                return;
+            }
+            if (previewFrameEncoder.encode(text).byteLength > controlMessageLimit(peer)) {
+                recordTransferDiagnostic('control_message', 'oversized_frame');
+                if (/^\s*\{\s*"type"\s*:\s*"catalog_snapshot"/.test(text)) {
+                    try { sendControlMessage(session, { type: 'catalog_error', message: 'A shared file list exceeded the control message size limit.' }); } catch { /* Peer may have left. */ }
+                    showToast(`${session.username} sent a shared file list that was too large.`);
+                } else showToast(`${session.username} sent a control message that was too large.`);
+                return;
+            }
             try {
                 const msg = JSON.parse(text); if (session.engine?.handle(msg)) return;
-                if (msg.type === 'catalog_snapshot') { acceptSessionCatalog(session, msg); return; }
+                if (msg.type === 'catalog_snapshot') {
+                    const error = acceptSessionCatalog(session, msg);
+                    if (error) {
+                        recordTransferDiagnostic('catalog_receive', 'invalid_snapshot');
+                        try { sendControlMessage(session, { type: 'catalog_error', message: error }); } catch { /* Peer may have left. */ }
+                        showToast(`${session.username}: ${error}`);
+                    }
+                    return;
+                }
+                if (msg.type === 'catalog_error') {
+                    showToast(`${session.username}: ${typeof msg.message === 'string' ? msg.message.slice(0, 256) : 'The shared file list could not be sent.'}`);
+                    return;
+                }
                 if (msg.type === 'catalog_request') { publishSessionCatalog(session, true); return; }
                 if (msg.type === 'preview_range_request') { void handleSessionPreviewRangeRequest(session, msg); return; }
                 if (msg.type === 'preview_range_error') {
@@ -819,7 +1107,7 @@ export function useP2P() {
                             content: msg.content.trim(), timestamp: Number.isSafeInteger(msg.timestamp) ? Number(msg.timestamp) : Date.now(), status: 'delivered' }]);
                         if (!chatOpen.current) setUnreadCount(count => count + 1);
                     }
-                    commands.send(JSON.stringify({ type: 'chat_ack', id: msg.id })); return;
+                    sendControlMessage(session, { type: 'chat_ack', id: msg.id }); return;
                 }
                 if (msg.type === 'chat_ack') setChatMessages(current => current.map(item => {
                     if (item.id !== msg.id || !item.recipientStatuses?.some(status => status.peerId === session.peerId)) return item;
@@ -827,7 +1115,10 @@ export function useP2P() {
                     return { ...item, recipientStatuses, status: recipientStatuses.every(status => status.status === 'delivered') ? 'delivered' : item.status };
                 }));
                 else if (['meta', 'file_ready', 'ack'].includes(msg.type)) showToast('The other browser is running an older version. Reload both peers.');
-            } catch (error) { showToast(`${session.username}: ${String(error)}`); }
+            } catch {
+                recordTransferDiagnostic('control_message', 'processing_failed');
+                showToast(`${session.username}: A control message could not be processed.`);
+            }
         };
         const sessionSocket = ws.current;
         const sessionRoom = currentRoom.current;
@@ -848,7 +1139,7 @@ export function useP2P() {
         const joinGeneration = ++roomJoinGeneration.current;
         currentRoom.current = room; temporary.current = newRoomType === 'temporary';
         setRoomId(room); setRoomType(newRoomType); setInRoom(true); setHasPeer(false); setSignalingStatus('connecting');
-        setSelfPeerId(''); selfPeerIdRef.current = ''; setMembers([]); setSelectedPeerIds([]); setCurrentReceivings([]);
+        setSelfPeerId(''); selfPeerIdRef.current = ''; setMembers([]); setSelectedPeerIds([]); updateCurrentReceivings(() => []);
         replaceOnlineFiles([]); replaceReceivedFiles([]);
         // Begin the local lookup before the server replies so a full-room rejection
         // can still show files already saved for this room on this device.
@@ -1327,18 +1618,17 @@ export function useP2P() {
     };
     const retryPeerConnection = useCallback((peerId: string) => retryPeerRef.current(peerId), []);
 
-    const addFilesToQueue = async (files: File[]) => {
-        if (!files.length) return;
+    const addFilesToQueue = async (files: File[]): Promise<boolean> => {
+        if (!files.length) return false;
         const usedIds = new Set(queue.current.map(item => item.id));
-        const recipientIds = [...roomMembers.current.keys()].slice(0, 1);
-        if (!recipientIds.length) {
+        const activePeer = [...sessions.current.values()].find(session => session.status === 'connected' &&
+            session.engine && session.data?.readyState === 'open' && session.control?.readyState === 'open');
+        if (!activePeer) {
             showToast('Join a room with another person before adding files.');
-            return;
+            return false;
         }
-        const recipients = recipientIds.map(peerId => {
-            const peer = sessions.current.get(peerId) || roomMembers.current.get(peerId)!;
-            return { peerId, peerName: peer.username, status: 'pending' as const, progress: 0, bytesTransferred: 0 };
-        });
+        const recipientIds = [activePeer.peerId];
+        const recipients = [{ peerId: activePeer.peerId, peerName: activePeer.username, status: 'pending' as const, progress: 0, bytesTransferred: 0 }];
         const items = files.map(file => {
             let id = generateId();
             while (usedIds.has(id)) id = generateId();
@@ -1349,18 +1639,76 @@ export function useP2P() {
         });
         changeQueue(previous => [...previous, ...items], true);
         scheduleRecipientTransfers();
+        return true;
     };
     const pauseSending = (id: string) => {
+        const isActive = [...activeRecipientTransfers.current].some(key => key.startsWith(`${id}:`));
+        const pausedAt = Date.now();
         for (const session of sessions.current.values()) session.engine?.pause(id);
-        changeQueue(files => files.map(file => file.id === id ? { ...file, status: 'paused', recipients: file.recipients.map(recipient =>
-            ['sending', 'pending'].includes(recipient.status) ? { ...recipient, status: 'paused' } : recipient) } : file));
+        changeQueue(files => files.map(file => {
+            if (file.id !== id) return file;
+            const recipients = file.recipients.map(recipient => {
+                if (!['sending', 'pending'].includes(recipient.status)) return recipient;
+                const isRecipientActive = isActive && recipient.status === 'sending';
+                return { ...recipient, status: 'paused' as const,
+                    pausedAt: isRecipientActive ? pausedAt : undefined,
+                    activeElapsedMs: isRecipientActive && recipient.startTime
+                        ? Math.max(recipient.activeElapsedMs || 0, pausedAt - recipient.startTime - (recipient.pausedMs || 0))
+                        : recipient.activeElapsedMs,
+                    speedBytesPerSecond: isRecipientActive ? 0 : recipient.speedBytesPerSecond };
+            });
+            return { ...file, status: 'paused', pausedAt: isActive ? pausedAt : undefined,
+                activeElapsedMs: isActive && file.startTime ? Math.max(file.activeElapsedMs || 0, pausedAt - file.startTime - (file.pausedMs || 0)) : file.activeElapsedMs,
+                speedBytesPerSecond: isActive ? 0 : file.speedBytesPerSecond, recipients };
+        }), true);
     };
     const resumeSending = (id: string) => {
-        if (!queue.current.some(file => file.id === id && file.recipients.some(recipient => ['failed', 'paused'].includes(recipient.status)))) return;
-        for (const session of sessions.current.values()) session.engine?.resume(id);
-        changeQueue(files => files.map(file => file.id !== id ? file : { ...file, status: 'pending',
-            recipients: file.recipients.map(recipient => ['failed', 'paused'].includes(recipient.status)
-                ? { ...recipient, status: 'pending', progress: 0, bytesTransferred: 0 } : recipient) }), true);
+        const file = queue.current.find(item => item.id === id);
+        if (!file || !file.recipients.some(recipient => recipient.status === 'paused')) return;
+        const isActive = [...activeRecipientTransfers.current].some(key => key.startsWith(`${id}:`));
+        const resumedAt = Date.now();
+        if (isActive) for (const session of sessions.current.values()) session.engine?.resume(id);
+        changeQueue(files => files.map(item => {
+            if (item.id !== id) return item;
+            const recipients = item.recipients.map(recipient => {
+                if (recipient.status !== 'paused') return recipient;
+                const pausedDuration = recipient.pausedAt ? Math.max(0, resumedAt - recipient.pausedAt) : 0;
+                return { ...recipient, status: isActive ? 'sending' as const : 'pending' as const,
+                    pausedMs: (recipient.pausedMs || 0) + pausedDuration, pausedAt: undefined, speedBytesPerSecond: 0 };
+            });
+            return { ...item, status: isActive ? 'sending' : 'pending',
+                pausedMs: (item.pausedMs || 0) + (item.pausedAt ? Math.max(0, resumedAt - item.pausedAt) : 0), pausedAt: undefined,
+                speedBytesPerSecond: 0, recipients };
+        }), true);
+        if (!isActive) scheduleRecipientTransfers();
+    };
+    const retrySending = (id: string) => {
+        const previous = queue.current.find(item => item.id === id);
+        if (!previous || !previous.recipients.some(recipient => recipient.status === 'failed')) return;
+        if ([...activeRecipientTransfers.current].some(key => key.startsWith(`${id}:`))) return;
+        const connectedPeers = [...sessions.current.values()].filter(session => session.status === 'connected' && session.engine &&
+            session.data?.readyState === 'open' && session.control?.readyState === 'open');
+        if (!connectedPeers.length) {
+            showToast('Reconnect to a peer before retrying this file.');
+            return;
+        }
+        const usedIds = new Set(queue.current.map(item => item.id));
+        let nextId = generateId();
+        while (usedIds.has(nextId) || nextId === id) nextId = generateId();
+        const fallbackPeer = connectedPeers[0];
+        const nextRecipients = previous.recipients.map(recipient => {
+            if (recipient.status !== 'failed') return recipient;
+            const currentPeer = connectedPeers.find(session => session.peerId === recipient.peerId) || fallbackPeer;
+            return { ...recipient, peerId: currentPeer.peerId, peerName: currentPeer.username, status: 'pending' as const,
+                progress: 0, bytesTransferred: 0, startTime: undefined, pausedAt: undefined, pausedMs: 0,
+                activeElapsedMs: 0, speedBytesPerSecond: 0, error: undefined };
+        });
+        const recipientIds = [...new Set(nextRecipients.map(recipient => recipient.peerId))];
+        changeQueue(items => items.map(item => item.id !== id ? item : {
+            ...item, id: nextId, recipientIds, recipients: nextRecipients, status: 'pending', progress: 0,
+            lastSentChunk: -1, startTime: undefined, pausedAt: undefined, pausedMs: 0, activeElapsedMs: 0,
+            speedBytesPerSecond: 0, bytesTransferred: 0, error: undefined,
+        }), true);
         scheduleRecipientTransfers();
     };
     const removeFromQueue = async (id: string) => {
@@ -1372,9 +1720,12 @@ export function useP2P() {
         changeQueue(() => [], true);
         for (const session of sessions.current.values()) for (const id of ids) session.engine?.cancel(id);
     };
-    const downloadFile = async (file: FileMetadata) => {
+    const downloadFile = async (file: FileMetadata): Promise<void> => {
         try { await streamFileToDownload(file.fileId, undefined, { name: file.name }); } catch (error) {
-            if (!(error instanceof DOMException && error.name === 'AbortError')) showToast(String(error));
+            if (error instanceof DOMException && error.name === 'AbortError') return;
+            const failure = error instanceof Error ? error : new Error('Unable to download this file.');
+            showToast(`Download failed: ${failure.message || 'Unable to download this file.'}`);
+            throw failure;
         }
     };
     const clearRoom = async () => {
@@ -1397,6 +1748,8 @@ export function useP2P() {
     const leaveRoom = () => {
         const room = currentRoom.current;
         if (!room) return;
+        autoDownloadQueue.current = [];
+        autoDownloadQueued.current.clear();
         roomJoinGeneration.current++;
         const wasTemporary = temporary.current;
         const socket = ws.current;
@@ -1413,7 +1766,7 @@ export function useP2P() {
         disconnectPeer();
         currentRoom.current = ''; temporary.current = false;
         setRoomId(''); setRoomType('persistent'); setInRoom(false); setHasPeer(false); setSignalingStatus('idle');
-        setSelfPeerId(''); selfPeerIdRef.current = ''; setMembers([]); roomMembers.current.clear(); setSelectedPeerIds([]); setCurrentReceivings([]);
+        setSelfPeerId(''); selfPeerIdRef.current = ''; setMembers([]); roomMembers.current.clear(); setSelectedPeerIds([]); updateCurrentReceivings(() => []);
         setConnectionFormKey(value => value + 1);
         queue.current = []; activeRecipientTransfers.current.clear(); setSendQueue([]);
         replaceReceivedFiles([]); replaceOnlineFiles([]); setChatMessages([]); setUnreadCount(0);
@@ -1434,11 +1787,28 @@ export function useP2P() {
     }, []);
     const sendChatMessage = (content: string) => {
         const targets = [...sessions.current.values()].filter(session => session.status === 'connected' && session.control?.readyState === 'open');
-        if (!content.trim() || !targets.length) return;
-        const message: ChatMessage = { id: generateId(), senderId: selfPeerIdRef.current, senderName: identityRef.current,
-            content: content.trim(), timestamp: Date.now(), status: 'sent',
-            recipientStatuses: targets.map(session => ({ peerId: session.peerId, peerName: session.username, status: 'sent' })) };
-        for (const session of targets) session.control!.send(JSON.stringify({ type: 'chat', ...message }));
+        const trimmed = content.trim();
+        if (!trimmed || !targets.length) return;
+        if (trimmed.length > 4000) { showToast('Chat messages can be up to 4,000 characters.'); return; }
+        const id = generateId();
+        const timestamp = Date.now();
+        const sendable = targets.filter(session => {
+            try {
+                encodeControlMessage(session.pc, { type: 'chat', id, senderId: selfPeerIdRef.current, senderName: identityRef.current,
+                    content: trimmed, timestamp, status: 'sent', recipientStatuses: targets.map(peer => ({
+                        peerId: peer.peerId, peerName: peer.username, status: 'sent',
+                    })) });
+                return true;
+            } catch { recordTransferDiagnostic('control_message', 'chat_oversized'); return false; }
+        });
+        if (!sendable.length) { showToast('This chat message is too large for the current connection.'); return; }
+        const message: ChatMessage = { id, senderId: selfPeerIdRef.current, senderName: identityRef.current,
+            content: trimmed, timestamp, status: 'sent',
+            recipientStatuses: sendable.map(session => ({ peerId: session.peerId, peerName: session.username, status: 'sent' })) };
+        for (const session of sendable) {
+            try { sendControlMessage(session, { type: 'chat', ...message }); }
+            catch { recordTransferDiagnostic('control_message', 'chat_send_failed'); }
+        }
         setChatMessages(messages => [...messages, message]);
     };
     const markChatRead = useCallback(() => setUnreadCount(0), []);
@@ -1484,6 +1854,7 @@ export function useP2P() {
         const session = [...sessions.current.values()].find(item => item.pc);
         const peer = session?.pc;
         let selectedCandidatePair: Record<string, string | number | null> | null = null;
+        const candidateTypeCounts: Record<string, number> = {};
         const dataChannels: Array<Record<string, string | number | null>> | null = peer ? [] : null;
         if (peer) {
             const stats = await peer.getStats();
@@ -1507,6 +1878,10 @@ export function useP2P() {
                         bytesReceived: typeof channel.bytesReceived === 'number' ? channel.bytesReceived : null,
                         timestamp: typeof channel.timestamp === 'number' ? channel.timestamp : null,
                     });
+                }
+                const candidateType = (report as RTCStats & { candidateType?: string }).candidateType;
+                if ((report.type === 'local-candidate' || report.type === 'remote-candidate') && typeof candidateType === 'string') {
+                    candidateTypeCounts[candidateType] = (candidateTypeCounts[candidateType] || 0) + 1;
                 }
             });
             let pair = pairId ? stats.get(pairId) : undefined;
@@ -1546,7 +1921,19 @@ export function useP2P() {
             peerId: session?.peerId ?? null,
             transferMetrics: { ...syncAggregateMetrics() },
             selectedCandidatePair,
+            candidateTypeCounts,
             dataChannels,
+            connection: peer ? {
+                connectionState: peer.connectionState,
+                iceConnectionState: peer.iceConnectionState,
+                iceGatheringState: peer.iceGatheringState,
+                signalingState: peer.signalingState,
+                channels: [session?.control, session?.data, session?.preview].map(channel => channel ? {
+                    label: channel.label, state: channel.readyState, bufferedAmount: channel.bufferedAmount,
+                } : null),
+            } : null,
+            iceServerHostnames: iceServerHostnames(ICE_SERVERS),
+            events: getRecentDiagnostics(),
             sctpMaxMessageSize: peer?.sctp?.maxMessageSize ?? null,
             visibilityState: document.visibilityState,
         };
@@ -1554,7 +1941,7 @@ export function useP2P() {
     return { roomId, roomType, connected, connectionType, signalingStatus, sendQueue, receivedFiles, onlineFiles, currentReceiving, currentReceivings,
         members, selectedPeerIds, setSelectedPeerIds, selfPeerId,
         connectionFormKey, chatMessages, unreadCount, settings, username, isChatOpen, isSettingsOpen, inRoom, hasPeer, toast,
-        setRoomId, join, retryConnection, leaveRoom, addFilesToQueue, pauseSending, resumeSending, removeFromQueue, clearAllQueue,
+        setRoomId, join, retryConnection, leaveRoom, addFilesToQueue, pauseSending, resumeSending, retrySending, removeFromQueue, clearAllQueue,
         retryPeerConnection,
         downloadFile, clearRoom, deleteReceivedFile, openPreview, closePreview, sendChatMessage, markChatRead, updateSettings, setIsChatOpen,
         setIsSettingsOpen, generateRoomId, dismissToast, notifyError: showToast, transferMetrics: syncAggregateMetrics(), getTransferDiagnostics };

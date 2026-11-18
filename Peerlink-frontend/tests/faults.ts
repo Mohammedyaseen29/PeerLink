@@ -22,11 +22,12 @@ button.onclick = async () => {
         for (const fault of ['hash', 'sequence']) {
             const data = new Channel(), control = new Channel();
             const errors: string[] = [];
+            let receiverFileId: string | undefined;
             const engine = new TransferEngine(data as unknown as RTCDataChannel, control as unknown as RTCDataChannel,
-                () => 'synthetic-fault-tests', { receiving() {}, received() { throw new Error('Corrupt file accepted'); }, error: message => errors.push(message) });
+                () => 'synthetic-fault-tests', { receiving(meta) { receiverFileId = meta.fileId; }, received() { throw new Error('Corrupt file accepted'); }, error: message => errors.push(message) });
             const fileId = crypto.randomUUID();
             try {
-                engine.handle({ type: 'transfer_meta', version: 3, fileId, name: 'synthetic.bin', size: 1, totalChunks: 1, chunkSize: CHUNK_SIZE });
+                engine.handle({ type: 'transfer_meta', version: 4, fileId, name: 'synthetic.bin', size: 1, totalChunks: 1, chunkSize: CHUNK_SIZE });
                 await until(() => control.sent.some(value => JSON.parse(String(value)).type === 'transfer_ready'));
                 const id = new TextEncoder().encode(fileId);
                 const packet = new ArrayBuffer(39 + id.length), view = new DataView(packet);
@@ -34,9 +35,27 @@ button.onclick = async () => {
                 new Uint8Array(packet, 6, id.length).set(id);
                 data.packet(packet);
                 await until(() => errors.length > 0);
-                if ((await getMetaData(fileId))?.status === 'complete') throw new Error('Corrupt file marked complete');
+                if (receiverFileId && (await getMetaData(receiverFileId))?.status === 'complete') throw new Error('Corrupt file marked complete');
                 append(`PASS: ${fault} fault rejected (${errors[0]})`);
             } finally { engine.dispose(); await deleteFile(fileId); }
+        }
+        // Preserve explicit compatibility coverage for the accepted legacy v3 wire size.
+        {
+            const data = new Channel(), control = new Channel();
+            let completed = false;
+            let receiverFileId: string | undefined;
+            const engine = new TransferEngine(data as unknown as RTCDataChannel, control as unknown as RTCDataChannel,
+                () => 'synthetic-fault-tests', { receiving(meta) { receiverFileId = meta.fileId; }, received() { completed = true; }, error(message) { throw new Error(message); } });
+            const fileId = crypto.randomUUID();
+            try {
+                engine.handle({ type: 'transfer_meta', version: 3, fileId, name: 'legacy-v3-empty.bin', size: 0,
+                    totalChunks: 0, chunkSize: 64 * 1024 - 128 });
+                await until(() => control.sent.some(value => JSON.parse(String(value)).type === 'transfer_complete'));
+                if (!completed || !receiverFileId || (await getMetaData(receiverFileId))?.status !== 'complete') {
+                    throw new Error('Legacy v3 metadata was not accepted');
+                }
+                append('PASS: legacy v3 metadata with its historical chunk size remains accepted');
+            } finally { engine.dispose(); if (receiverFileId) await deleteFile(receiverFileId); }
         }
         const data = new Channel(), control = new Channel();
         const engine = new TransferEngine(data as unknown as RTCDataChannel, control as unknown as RTCDataChannel,

@@ -16,11 +16,12 @@ import { releasePreviewUrl, type FileMetadata } from "./ProgressDB";
 import { getFileMimeType } from "./utils/helpers";
 import type { QueuedFile } from "./types";
 import { registerPeerLinkServiceWorker } from "./serviceWorker";
-import { CircleAlert, CircleCheck, Info, LoaderCircle, RefreshCw, WifiOff, X } from "lucide-react";
+import { CircleAlert, CircleCheck, Copy, Info, LoaderCircle, RefreshCw, WifiOff, X } from "lucide-react";
 import { parseRoomInvite } from "./utils/roomInvite";
 
 function App() {
   const [appUpdateReady, setAppUpdateReady] = useState(false);
+  const [copyingDiagnostics, setCopyingDiagnostics] = useState(false);
   const serviceWorkerRegistration = useRef<ServiceWorkerRegistration | null>(null);
   const reloadAfterControlChange = useRef(false);
   const {
@@ -49,6 +50,7 @@ function App() {
     leaveRoom,
     retryConnection,
     retryPeerConnection,
+    retrySending,
     addFilesToQueue,
     pauseSending,
     resumeSending,
@@ -66,6 +68,7 @@ function App() {
     generateRoomId,
     dismissToast,
     notifyError,
+    getTransferDiagnostics,
   } = useP2P();
   const retryablePeer = members.find((member) => member.status === "disconnected" && member.supportsReconnect === true);
   const inRoomRef = useRef(inRoom);
@@ -167,8 +170,22 @@ function App() {
   useEffect(() => () => { if (previewUrl) void releasePreviewUrl(previewUrl); }, [previewUrl]);
   useEffect(() => () => { if (previewFile) closePreview(previewFile.fileId); }, [previewFile, closePreview]);
 
-  const handleFilesSelect = async (files: File[]) => {
-    await addFilesToQueue(files);
+  const handleFilesSelect = async (files: File[]): Promise<boolean> => {
+    return await addFilesToQueue(files);
+  };
+
+  const handleCopyDiagnostics = async () => {
+    setCopyingDiagnostics(true);
+    try {
+      if (!navigator.clipboard?.writeText) throw new Error("Clipboard access is unavailable in this browser.");
+      const details = await getTransferDiagnostics();
+      await navigator.clipboard.writeText(JSON.stringify(details, null, 2));
+      notifyError("Connection details copied.", "success");
+    } catch (error) {
+      notifyError(`Unable to copy connection details: ${error instanceof Error ? error.message : String(error)}`);
+    } finally {
+      setCopyingDiagnostics(false);
+    }
   };
 
   const handlePreview = async (file: FileMetadata) => {
@@ -301,6 +318,9 @@ function App() {
                 </div>
                 {signalingStatus === "offline" && <button type="button" className="room-status-retry" onClick={retryConnection}><RefreshCw size={15} /> Retry</button>}
                 {signalingStatus === "unreachable" && retryablePeer && <button type="button" className="room-status-retry" onClick={() => retryPeerConnection(retryablePeer.peerId)}><RefreshCw size={15} /> Retry</button>}
+                <button type="button" className="room-status-retry diagnostics-copy" onClick={() => void handleCopyDiagnostics()} disabled={copyingDiagnostics}>
+                  <Copy size={15} aria-hidden="true" /> {copyingDiagnostics ? "Copying…" : "Copy connection details"}
+                </button>
               </div>
             )}
 
@@ -317,7 +337,7 @@ function App() {
             {signalingStatus !== "full" && (
               <FileUploader
                 onFilesSelect={handleFilesSelect}
-                disabled={!connected}
+                canSend={connected}
               />
             )}
 
@@ -326,6 +346,7 @@ function App() {
                 queue={sendQueue}
                 onPause={pauseSending}
                 onResume={resumeSending}
+                onRetry={retrySending}
                 onRemove={removeFromQueue}
                 onClearAll={clearAllQueue}
                 onPreview={handleQueuedPreview}

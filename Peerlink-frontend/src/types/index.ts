@@ -17,6 +17,11 @@ export type QueuedFile = {
     lastSentChunk: number;
     startTime?: number;
     bytesTransferred?: number;
+    pausedAt?: number;
+    pausedMs?: number;
+    activeElapsedMs?: number;
+    speedBytesPerSecond?: number;
+    error?: string;
     totalChunks: number;
 };
 
@@ -36,6 +41,11 @@ export type RecipientTransfer = {
   progress: number;
   bytesTransferred: number;
   startTime?: number;
+  pausedAt?: number;
+  pausedMs?: number;
+  activeElapsedMs?: number;
+  speedBytesPerSecond?: number;
+  error?: string;
 };
 
 export type ConnectionType = "disconnected" | "local" | "p2p" | "relay";
@@ -58,6 +68,8 @@ export type ReceivingFile = {
     size: number;
     startTime: number;
     bytesReceived: number;
+    status?: "receiving" | "failed";
+    error?: string;
 };
 
 export type RoomType = "persistent" | "temporary";
@@ -95,9 +107,10 @@ export type P2PState = {
 export type P2PActions = {
     join: (roomId: string, roomType?: RoomType) => void;
     setRoomId: (roomId: string) => void;
-    addFilesToQueue: (files: File[]) => Promise<void>;
+    addFilesToQueue: (files: File[]) => Promise<boolean>;
     pauseSending: (fileId: string) => void;
     resumeSending: (fileId: string) => void;
+    retrySending: (fileId: string) => void;
     removeFromQueue: (fileId: string) => Promise<void>;
     clearAllQueue: () => Promise<void>;
     downloadFile: (file: FileMetadata) => Promise<void>;

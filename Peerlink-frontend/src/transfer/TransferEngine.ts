@@ -1,23 +1,52 @@
 import { saveMetaData, saveChunks, deleteFile, type FileMetadata } from '../ProgressDB';
 import { getFileMimeType } from '../utils/helpers';
 
-export const CHUNK_SIZE = 64 * 1024 - 128;
+export const CHUNK_SIZE = 16 * 1024 - 128;
+const LEGACY_CHUNK_SIZE = 64 * 1024 - 128;
 // Raw loopback trials favored a smaller native queue over 2 MiB; 256 KiB kept more headroom than 128 KiB.
 export const SEND_BUFFER_HIGH_WATER = 256 * 1024;
 const HIGH = SEND_BUFFER_HIGH_WATER;
 const LOW = HIGH / 2;
-const WINDOW = 128; // At most 8 MiB sent but not committed, including SCTP queues.
+const WINDOW = 128; // 2 MiB for current sends; at most 8 MiB for legacy receive chunks.
 const INITIAL_READ_BATCH = 16;
 const READ_BATCH = 32;
 const RECEIVE_BATCH = 32;
 const encoder = new TextDecoder();
+const MAX_TRANSFER_PATH_LENGTH = 1024;
+
+function validTransferName(name: unknown): name is string {
+    return typeof name === 'string' && name.length > 0 && name.length <= 255 && name !== '.' && name !== '..' &&
+        !/[\u0000-\u001f\u007f/\\]/.test(name);
+}
+
+function validTransferPath(path: unknown): path is string | undefined {
+    if (path === undefined || path === '') return true;
+    if (typeof path !== 'string' || path.length > MAX_TRANSFER_PATH_LENGTH || /[\u0000-\u001f\u007f\\]/.test(path) ||
+        path.startsWith('/') || /^[A-Za-z]:/.test(path)) return false;
+    return path.split('/').every(segment => segment.length > 0 && segment !== '.' && segment !== '..' && !segment.includes(':'));
+}
+
+function transferChunkSize(id: string, getMaxMessageSize?: () => number | undefined): number {
+    const headerBytes = 38 + new TextEncoder().encode(id).byteLength;
+    let maximum = Number.POSITIVE_INFINITY;
+    try {
+        const negotiated = getMaxMessageSize?.();
+        if (typeof negotiated === 'number' && Number.isFinite(negotiated) && negotiated > 0) maximum = Math.floor(negotiated);
+        // SCTP treats zero and an unavailable value as no negotiated cap.
+    } catch { /* The default chunk is safe when the channel limit is unavailable. */ }
+    const payloadLimit = Math.min(CHUNK_SIZE, maximum - headerBytes);
+    if (payloadLimit < 1) throw new Error('The peer data channel has a message limit too small for file transfer.');
+    return payloadLimit;
+}
 type Packet = { chunkIndex: number; data: ArrayBuffer; hash: Uint8Array };
 type PendingBatch = { packets: Packet[]; validation: Promise<void>; timerFlush: boolean };
-type Incoming = { meta: FileMetadata; wireId: string; next: number; committed: number; queue: Packet[]; writing: boolean; committing: boolean; cancelled: boolean; flushRequested: boolean; pendingBatch?: PendingBatch; timer?: number };
-type Outgoing = { id: string; file: File; next: number; committed: number; ready: boolean; paused: boolean; done: boolean; error?: Error; progress: (bytes: number) => void; lastUpdate: number };
+type Incoming = { meta: FileMetadata; wireId: string; next: number; committed: number; queue: Packet[]; writing: boolean; committing: boolean; cancelled: boolean; reportedComplete: boolean; flushRequested: boolean; pendingBatch?: PendingBatch; cleanup?: Promise<void>; timer?: number };
+type Outgoing = { id: string; file: File; chunkSize: number; next: number; committed: number; ready: boolean; paused: boolean; done: boolean; error?: Error; progress: (bytes: number) => void; lastUpdate: number };
+export type TransferEngineOptions = { getMaxMessageSize?: () => number | undefined };
 export type TransferEvents = {
     receiving: (meta: FileMetadata, bytes: number) => void;
     received: (meta: FileMetadata) => void;
+    cancelled?: (meta: FileMetadata) => void;
     error: (message: string) => void;
 };
 
@@ -49,10 +78,11 @@ export class TransferEngine {
     private roomType: () => "persistent" | "temporary";
     private events: TransferEvents;
     private source: { peerId?: string; peerName?: string };
+    private options: TransferEngineOptions;
     constructor(data: RTCDataChannel, control: RTCDataChannel, room: () => string, events: TransferEvents,
         roomType: () => "persistent" | "temporary" = () => "persistent",
-        source: { peerId?: string; peerName?: string } = {}) {
-        this.data = data; this.control = control; this.room = room; this.events = events; this.roomType = roomType; this.source = source;
+        source: { peerId?: string; peerName?: string } = {}, options: TransferEngineOptions = {}) {
+        this.data = data; this.control = control; this.room = room; this.events = events; this.roomType = roomType; this.source = source; this.options = options;
         data.binaryType = 'arraybuffer';
         data.bufferedAmountLowThreshold = LOW;
         data.addEventListener('bufferedamountlow', this.onBufferedAmountLow);
@@ -62,6 +92,34 @@ export class TransferEngine {
     }
 
     private wake = () => { for (const fn of [...this.waiters]) fn(); };
+    private emitError(message: string) {
+        try { this.events.error(message); } catch (error) { console.error('Transfer error callback failed:', error); }
+    }
+    private emitReceiving(meta: FileMetadata, bytes: number) {
+        try { this.events.receiving(meta, bytes); } catch (error) { console.error('Transfer progress callback failed:', error); }
+    }
+    private emitReceived(meta: FileMetadata) {
+        try { this.events.received(meta); } catch (error) { console.error('Transfer completion callback failed:', error); }
+    }
+    private emitCancelled(meta: FileMetadata) {
+        try { this.events.cancelled?.(meta); } catch (error) { console.error('Transfer cancellation callback failed:', error); }
+    }
+    private emitProgress(outgoing: Outgoing, bytes: number) {
+        try { outgoing.progress(bytes); } catch (error) { console.error('Transfer progress callback failed:', error); }
+    }
+    private async checkAvailableStorage(meta: FileMetadata) {
+        try {
+            const estimate = await navigator.storage?.estimate?.();
+            if (typeof estimate?.quota === 'number' && Number.isFinite(estimate.quota) &&
+                typeof estimate.usage === 'number' && Number.isFinite(estimate.usage) &&
+                estimate.quota - estimate.usage < meta.size) {
+                throw new Error(`Not enough receiver storage is available for "${meta.name}". Free space and retry.`);
+            }
+        } catch (error) {
+            if (error instanceof Error && error.message.startsWith('Not enough receiver storage')) throw error;
+            // Storage estimates are advisory. IndexedDB remains the final quota check.
+        }
+    }
     private onBufferedAmountLow = () => {
         this.metrics.bufferedLowEvents++;
         this.wake();
@@ -91,8 +149,21 @@ export class TransferEngine {
             const failure = error instanceof Error ? error : new Error(String(error));
             if (this.outgoing && message.fileId === this.outgoing.id) { this.outgoing.error = failure; this.wake(); }
             else if (message.type === 'transfer_meta' && this.control.readyState === 'open') {
-                this.message({ type: 'transfer_error', fileId: message.fileId, message: failure.message });
-                this.events.error(failure.message);
+                const incoming = this.incoming;
+                const messageText = incoming && incoming.wireId === message.fileId
+                    ? failure instanceof DOMException && failure.name === 'QuotaExceededError'
+                        ? `Not enough receiver storage for "${incoming.meta.name}". Free space and retry.`
+                        : failure.message.startsWith('Not enough receiver storage')
+                            ? failure.message
+                            : `Unable to prepare "${incoming.meta.name}": ${failure.message}`
+                    : failure.message;
+                if (incoming && incoming.wireId === message.fileId && !incoming.reportedComplete) {
+                    incoming.cancelled = true;
+                    void this.removeIncomplete(incoming);
+                    this.incoming = null;
+                }
+                try { this.message({ type: 'transfer_error', fileId: message.fileId, message: messageText }); } catch { /* The peer has left. */ }
+                this.emitError(messageText);
             } else this.failIncoming(failure);
         });
         return true;
@@ -103,35 +174,50 @@ export class TransferEngine {
         const out = this.outgoing;
         if (msg.type === 'transfer_meta') {
             if (this.incoming && !this.incoming.cancelled && this.incoming.meta.status !== 'complete') throw new Error('Receiver already busy');
-            const { fileId, name, size, totalChunks, chunkSize } = msg;
-            if (typeof fileId !== 'string' || !/^[A-Za-z0-9_-]{1,64}$/.test(fileId) || typeof name !== 'string' ||
-                !Number.isSafeInteger(size) || Number(size) < 0 || chunkSize !== CHUNK_SIZE ||
-                totalChunks !== Math.ceil(Number(size) / CHUNK_SIZE) || msg.version !== 3) throw new Error('Incompatible transfer metadata');
+            const { fileId, name, size, totalChunks, chunkSize, path } = msg;
+            const validVersionAndChunkSize = msg.version === 3
+                ? chunkSize === LEGACY_CHUNK_SIZE
+                : msg.version === 4 && Number.isSafeInteger(chunkSize) && Number(chunkSize) >= 1 && Number(chunkSize) <= LEGACY_CHUNK_SIZE;
+            if (typeof fileId !== 'string' || !/^[A-Za-z0-9_-]{1,64}$/.test(fileId) || !validTransferName(name) ||
+                !validTransferPath(path) || !Number.isSafeInteger(size) || Number(size) < 0 || !validVersionAndChunkSize ||
+                totalChunks !== Math.ceil(Number(size) / Number(chunkSize)) || Number(totalChunks) > 0x1_0000_0000) {
+                throw new Error('This transfer uses unsupported metadata. Update PeerLink on both devices and retry.');
+            }
             const localId = crypto.randomUUID();
             const meta: FileMetadata = { fileId: localId, sourcePeerId: this.source.peerId, sourceName: this.source.peerName,
-                sharedWithRoom: msg.sharedWithRoom === true, name, size: Number(size), totalChunks: Number(totalChunks), chunkSize: CHUNK_SIZE,
-                roomId: this.room(), roomType: this.roomType(), path: typeof msg.path === 'string' ? msg.path : undefined,
+                sharedWithRoom: msg.sharedWithRoom === true, name, size: Number(size), totalChunks: Number(totalChunks), chunkSize: Number(chunkSize),
+                roomId: this.room(), roomType: this.roomType(), path: path || undefined,
                 mimeType: typeof msg.mimeType === 'string' ? msg.mimeType : '', receivedChunks: 0, status: 'receiving', createdAt: Date.now() };
-            const incoming: Incoming = { meta, wireId: fileId, next: 0, committed: 0, queue: [], writing: false, committing: false, cancelled: false, flushRequested: false };
+            const incoming: Incoming = { meta, wireId: fileId, next: 0, committed: 0, queue: [], writing: false, committing: false,
+                cancelled: false, reportedComplete: false, flushRequested: false };
             this.incoming = incoming;
+            await this.checkAvailableStorage(meta);
+            if (this.disposed || incoming.cancelled || this.incoming !== incoming) {
+                await this.removeIncomplete(incoming);
+                return;
+            }
             const storageStarted = performance.now();
             try { await saveMetaData(meta); }
             finally { this.metrics.storageMs += performance.now() - storageStarted; }
-            if (this.disposed) return;
-            this.events.receiving(meta, 0);
+            if (this.disposed || incoming.cancelled || this.incoming !== incoming) {
+                await this.removeIncomplete(incoming);
+                return;
+            }
+            this.emitReceiving(meta, 0);
             this.message({ type: 'transfer_ready', fileId });
             if (!meta.totalChunks) await this.finishIncoming(incoming);
         } else if (msg.type === 'transfer_cancel') {
             const incoming = this.incoming;
             if (incoming && incoming.wireId === msg.fileId) {
+                if (incoming.reportedComplete) return;
                 incoming.cancelled = true;
                 incoming.committing = false;
                 clearTimeout(incoming.timer);
                 incoming.queue = [];
                 incoming.pendingBatch = undefined;
                 incoming.flushRequested = false;
-                // The active transaction precedes deleteFile in IndexedDB's transaction order.
-                await deleteFile(incoming.meta.fileId);
+                await this.removeIncomplete(incoming);
+                this.emitCancelled({ ...incoming.meta });
             }
         } else if (out && msg.fileId === out.id) {
             if (msg.type === 'transfer_ready') out.ready = true;
@@ -142,11 +228,15 @@ export class TransferEngine {
                 const now = performance.now();
                 if (now - out.lastUpdate >= 150 || msg.type === 'transfer_complete') {
                     out.lastUpdate = now;
-                    out.progress(Math.min(count * CHUNK_SIZE, out.file.size));
+                    this.emitProgress(out, Math.min(count * out.chunkSize, out.file.size));
                 }
-                if (msg.type === 'transfer_complete' && count === Math.ceil(out.file.size / CHUNK_SIZE)) out.done = true;
+                if (msg.type === 'transfer_complete' && count === Math.ceil(out.file.size / out.chunkSize)) out.done = true;
             }
-            if (msg.type === 'transfer_error') out.error = new Error(String(msg.message));
+            if (msg.type === 'transfer_error') {
+                const reason = String(msg.message);
+                out.error = new Error(reason === 'Incompatible transfer metadata'
+                    ? 'This peer is running an older version of PeerLink. Update both devices and retry.' : reason);
+            }
             this.wake();
         }
     }
@@ -164,12 +254,14 @@ export class TransferEngine {
             if (id !== incoming.wireId) return; // Late packets from a cancelled file.
             const index = view.getUint32(2, true);
             if (index < incoming.next) return;
-            const expected = Math.min(CHUNK_SIZE, incoming.meta.size - index * CHUNK_SIZE);
+            const chunkSize = incoming.meta.chunkSize ?? LEGACY_CHUNK_SIZE;
+            const expected = Math.min(chunkSize, incoming.meta.size - index * chunkSize);
             if (index !== incoming.next || expected <= 0 || packet.byteLength - 38 - length !== expected) throw new Error('File chunk sequence or size mismatch');
             if (incoming.next - incoming.committed >= WINDOW) throw new Error('Receiver buffer limit exceeded');
             incoming.next++;
             incoming.queue.push({ chunkIndex: index, data: packet.slice(38 + length), hash: new Uint8Array(packet.slice(6 + length, 38 + length)) });
-            this.metrics.peakReceiveBytes = Math.max(this.metrics.peakReceiveBytes, (incoming.next - incoming.committed) * CHUNK_SIZE);
+            this.metrics.peakReceiveBytes = Math.max(this.metrics.peakReceiveBytes,
+                Math.min(incoming.next * chunkSize, incoming.meta.size) - Math.min(incoming.committed * chunkSize, incoming.meta.size));
             this.scheduleFlush(incoming);
         } catch (error) { this.failIncoming(error as Error); }
     };
@@ -218,18 +310,35 @@ export class TransferEngine {
 
     private failIncoming(error: Error) {
         const incoming = this.incoming;
-        const message = error instanceof DOMException && error.name === 'QuotaExceededError'
-            ? 'Not enough receiver storage. Free space and retry.' : error.message;
-        if (incoming && !incoming.cancelled) {
+        const message = incoming
+            ? error instanceof DOMException && error.name === 'QuotaExceededError'
+                ? `Not enough receiver storage for "${incoming.meta.name}". Free space and retry.`
+                : `Unable to receive "${incoming.meta.name}": ${error.message}`
+            : error instanceof DOMException && error.name === 'QuotaExceededError'
+                ? 'Not enough receiver storage. Free space and retry.' : error.message;
+        if (incoming && !incoming.reportedComplete) {
             incoming.cancelled = true;
             incoming.committing = false;
             clearTimeout(incoming.timer);
             incoming.queue = [];
             incoming.pendingBatch = undefined;
             incoming.flushRequested = false;
-            if (this.control.readyState === 'open') this.message({ type: 'transfer_error', fileId: incoming.wireId, message });
+            void this.removeIncomplete(incoming);
+            if (this.control.readyState === 'open') {
+                try { this.message({ type: 'transfer_error', fileId: incoming.wireId, message }); } catch { /* The peer has left. */ }
+            }
         }
-        this.events.error(message);
+        this.emitError(message);
+    }
+
+    private removeIncomplete(incoming: Incoming): Promise<void> {
+        if (incoming.reportedComplete) return Promise.resolve();
+        if (incoming.cleanup) return incoming.cleanup;
+        incoming.cleanup = deleteFile(incoming.meta.fileId).catch(error => {
+            const detail = error instanceof Error ? error.message : String(error);
+            this.emitError(`Unable to remove incomplete file "${incoming.meta.name}" from receiver storage: ${detail}`);
+        });
+        return incoming.cleanup;
     }
 
     private async finishIncoming(incoming: Incoming) {
@@ -241,8 +350,12 @@ export class TransferEngine {
             finally { this.metrics.storageMs += performance.now() - storageStarted; }
         }
         if (incoming.cancelled || this.disposed) return;
-        this.events.received({ ...incoming.meta });
-        this.message({ type: 'transfer_complete', fileId: incoming.wireId, committed: incoming.committed });
+        incoming.reportedComplete = true;
+        this.emitReceived({ ...incoming.meta });
+        try { this.message({ type: 'transfer_complete', fileId: incoming.wireId, committed: incoming.committed }); }
+        catch (error) {
+            this.emitError(`"${incoming.meta.name}" was saved, but the sender could not be notified: ${error instanceof Error ? error.message : String(error)}`);
+        }
     }
 
     private async flush(incoming: Incoming) {
@@ -296,7 +409,8 @@ export class TransferEngine {
                 incoming.meta.receivedChunks = committed;
                 if (completesFile) incoming.meta.status = 'complete';
                 this.metrics.receivedBytes += batch.reduce((n, packet) => n + packet.data.byteLength, 0);
-                this.events.receiving(incoming.meta, Math.min(committed * CHUNK_SIZE, incoming.meta.size));
+                const chunkSize = incoming.meta.chunkSize ?? LEGACY_CHUNK_SIZE;
+                this.emitReceiving(incoming.meta, Math.min(committed * chunkSize, incoming.meta.size));
                 if (committed === incoming.meta.totalChunks) await this.finishIncoming(incoming);
                 else this.message({ type: 'transfer_progress', fileId: incoming.wireId, committed });
             }
@@ -332,7 +446,13 @@ export class TransferEngine {
             }, 30000);
             this.reads.set(requestId, { resolve, reject, timer });
             this.metrics.pendingReads = this.reads.size;
-            this.getWorker().postMessage({ type: 'read', requestId, fileId: out.id, start, count, chunkSize: CHUNK_SIZE });
+            try { this.getWorker().postMessage({ type: 'read', requestId, fileId: out.id, start, count, chunkSize: out.chunkSize }); }
+            catch (error) {
+                clearTimeout(timer);
+                this.reads.delete(requestId);
+                this.metrics.pendingReads = this.reads.size;
+                reject(error instanceof Error ? error : new Error(String(error)));
+            }
         });
     }
     private clearWorker(error = new Error('Transfer stopped')) {
@@ -348,9 +468,19 @@ export class TransferEngine {
 
     async send(file: File, id: string, progress: (bytes: number) => void, keepWorkerForNext = false, sharedWithRoom = true) {
         if (this.outgoing || this.disposed) throw new Error('Sender unavailable');
-        const out: Outgoing = { id, file, next: 0, committed: 0, ready: false, paused: false, done: false, progress, lastUpdate: 0 };
+        const path = file.webkitRelativePath || undefined;
+        if (!/^[A-Za-z0-9_-]{1,64}$/.test(id) || !validTransferName(file.name) || !validTransferPath(path) ||
+            !Number.isSafeInteger(file.size) || file.size < 0) {
+            throw new Error('The file name or relative path is not supported. Rename the file and retry.');
+        }
+        const chunkSize = transferChunkSize(id, this.options.getMaxMessageSize);
+        const out: Outgoing = { id, file, chunkSize, next: 0, committed: 0, ready: false, paused: false, done: false, progress, lastUpdate: 0 };
         this.outgoing = out;
-        const totalChunks = Math.ceil(file.size / CHUNK_SIZE);
+        const totalChunks = Math.ceil(file.size / out.chunkSize);
+        if (totalChunks > 0x1_0000_0000) {
+            this.outgoing = null;
+            throw new Error('This file exceeds the transfer protocol size limit.');
+        }
         let lastAdvance = performance.now();
         let lastCommitted = 0;
         const check = () => {
@@ -370,8 +500,8 @@ export class TransferEngine {
                 nextRead = this.read(out, 0, Math.min(INITIAL_READ_BATCH, totalChunks));
                 nextRead.catch(() => undefined);
             }
-            this.message({ type: 'transfer_meta', version: 3, fileId: id, name: file.name, path: file.webkitRelativePath, sharedWithRoom,
-                mimeType: getFileMimeType(file), size: file.size, totalChunks, chunkSize: CHUNK_SIZE });
+            this.message({ type: 'transfer_meta', version: 4, fileId: id, name: file.name, path, sharedWithRoom,
+                mimeType: getFileMimeType(file), size: file.size, totalChunks, chunkSize: out.chunkSize });
             while (!out.ready) {
                 check();
                 const waitStarted = performance.now();
@@ -434,7 +564,7 @@ export class TransferEngine {
                         }
                     }
                     out.next++;
-                    this.metrics.sentBytes += Math.min(CHUNK_SIZE, file.size - (out.next - 1) * CHUNK_SIZE);
+                    this.metrics.sentBytes += Math.min(out.chunkSize, file.size - (out.next - 1) * out.chunkSize);
                     this.metrics.peakBufferedBytes = Math.max(this.metrics.peakBufferedBytes, this.data.bufferedAmount);
                 }
             }
@@ -482,6 +612,7 @@ export class TransferEngine {
             this.incoming.queue = [];
             this.incoming.pendingBatch = undefined;
             this.incoming.flushRequested = false;
+            void this.removeIncomplete(this.incoming);
         }
         this.clearWorker(); this.wake();
         this.data.removeEventListener('bufferedamountlow', this.onBufferedAmountLow);

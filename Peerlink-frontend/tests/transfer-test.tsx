@@ -9,12 +9,58 @@ const signalingSockets: Array<{ socket: WebSocket; peerId?: string }> = [];
 const signaledOffers: Array<{ peerId?: string; targetPeerId?: string; sdp?: string }> = [];
 const reconnectLinks: Array<{ peerId?: string; targetPeerId?: string; linkId?: string }> = [];
 const rtcPeers: RTCPeerConnection[] = [];
+const nativeDataFrameSizes: number[] = [];
+const instrumentedDataChannelPrototypes = new WeakSet<object>();
+function instrumentDataChannel(channel: RTCDataChannel) {
+    const prototype = Object.getPrototypeOf(channel) as RTCDataChannel & { send: RTCDataChannel['send'] };
+    if (instrumentedDataChannelPrototypes.has(prototype)) return;
+    instrumentedDataChannelPrototypes.add(prototype);
+    const nativeDataSend = prototype.send;
+    prototype.send = function (data: string | ArrayBufferLike | Blob | ArrayBufferView) {
+        if ((this as RTCDataChannel).label === 'data') {
+            const size = typeof data === 'string' ? new TextEncoder().encode(data).byteLength
+                : data instanceof Blob ? data.size
+                    : data instanceof ArrayBuffer ? data.byteLength
+                        : ArrayBuffer.isView(data) ? data.byteLength : 0;
+            nativeDataFrameSizes.push(size);
+        }
+        return nativeDataSend.call(this, data);
+    };
+}
 const NativeRTCPeerConnection = window.RTCPeerConnection;
 window.RTCPeerConnection = new Proxy(NativeRTCPeerConnection, {
     construct(target, args, newTarget) {
         const peer = Reflect.construct(target, args, newTarget) as RTCPeerConnection;
         rtcPeers.push(peer);
+        const nativeCreateDataChannel = peer.createDataChannel.bind(peer);
+        peer.createDataChannel = function (label, options) {
+            const channel = nativeCreateDataChannel(label, options);
+            instrumentDataChannel(channel);
+            return channel;
+        };
         return peer;
+    },
+});
+let failNextWorkerRead = false;
+const NativeWorker = window.Worker;
+window.Worker = new Proxy(NativeWorker, {
+    construct(target, args) {
+        const worker = Reflect.construct(target, args, target);
+        const post = worker.postMessage.bind(worker);
+        (worker as Worker & { postMessage: (message: unknown, transfer?: Transferable[]) => void }).postMessage =
+            (message: unknown, transfer?: Transferable[]) => {
+                if (failNextWorkerRead && message && typeof message === 'object' &&
+                    (message as { type?: unknown }).type === 'read') {
+                    failNextWorkerRead = false;
+                    const requestId = (message as { requestId?: unknown }).requestId;
+                    queueMicrotask(() => worker.dispatchEvent(new MessageEvent('message', {
+                        data: { requestId, error: 'Synthetic worker read failure' },
+                    })));
+                    return;
+                }
+                post(message, transfer as Transferable[] | undefined);
+            };
+        return worker;
     },
 });
 const nativeWebSocketSend = WebSocket.prototype.send;
@@ -59,12 +105,26 @@ async function until(predicate: () => boolean, description: string, timeout = 30
         await delay(25);
     }
 }
+async function untilWithoutFailureCheck(predicate: () => boolean, description: string, timeout = 30000) {
+    const deadline = Date.now() + timeout;
+    while (!predicate()) {
+        if (Date.now() > deadline) throw new Error(`Timed out: ${description}`);
+        await delay(25);
+    }
+}
 const pattern = new Uint8Array(1024 * 1024);
 for (let i = 0; i < pattern.length; i++) pattern[i] = (i * 31 + (i >>> 8)) & 255;
 function source(size: number, name: string, seed = 0) {
     const parts: BlobPart[] = [];
-    const content = seed === 0 ? pattern : pattern.map((byte) => (byte + seed) & 255);
-    for (let remaining = size; remaining > 0; remaining -= content.length) parts.push(content.subarray(0, Math.min(remaining, content.length)));
+    for (let offset = 0; offset < size; offset += pattern.length) {
+        const length = Math.min(pattern.length, size - offset);
+        if (seed === 0) parts.push(pattern.subarray(0, length));
+        else {
+            const content = new Uint8Array(length);
+            for (let index = 0; index < length; index++) content[index] = (pattern[index] + seed) & 255;
+            parts.push(content);
+        }
+    }
     return new File(parts, name, { type: 'application/octet-stream' });
 }
 function iceUfrag(sdp?: string) { return sdp?.match(/^a=ice-ufrag:([^\r\n]+)/m)?.[1]; }
@@ -87,6 +147,29 @@ async function verify(meta: FileMetadata, seed = 0) {
         tx.oncomplete = () => offset === meta.size && index === meta.totalChunks ? resolve() : reject(new Error('Stored length mismatch'));
         tx.onerror = () => reject(tx.error);
     });
+}
+async function verifyExactMedia(meta: FileMetadata, expected: Uint8Array, expectedHash: ArrayBuffer) {
+    const db = await openDB();
+    const bytes = new Uint8Array(meta.size);
+    let offset = 0, index = 0;
+    await new Promise<void>((resolve, reject) => {
+        const tx = db.transaction('chunks', 'readonly');
+        const request = tx.objectStore('chunks').openCursor(IDBKeyRange.bound([meta.fileId, 0], [meta.fileId, Number.MAX_SAFE_INTEGER]));
+        request.onsuccess = () => {
+            const cursor = request.result;
+            if (!cursor) return;
+            if (cursor.value.chunkIndex !== index++) { reject(new Error(`Media chunk gap: ${meta.name}`)); return; }
+            const chunk = new Uint8Array(cursor.value.data);
+            bytes.set(chunk, offset); offset += chunk.length;
+            cursor.continue();
+        };
+        tx.oncomplete = () => resolve();
+        tx.onerror = () => reject(tx.error);
+    });
+    if (offset !== expected.length || offset !== meta.size || index !== meta.totalChunks ||
+        bytes.some((byte, i) => byte !== expected[i])) throw new Error(`Exact media bytes mismatch: ${meta.name}`);
+    const actualHash = await crypto.subtle.digest('SHA-256', bytes);
+    if (new Uint8Array(actualHash).some((byte, i) => byte !== new Uint8Array(expectedHash)[i])) throw new Error(`Media SHA-256 mismatch: ${meta.name}`);
 }
 async function runTwoMemberCapacityTest(room: string, append: (line: string) => void, extended: boolean) {
     append('Joining a two-member room, rejecting a third join, and retaining the open pair...');
@@ -301,12 +384,90 @@ function Tests() {
                 append('TRANSFER-ONLY TEST PASSED');
                 return;
             }
-            const files = Array.from({ length: 120 }, (_, i) => source(i === 0 ? 0 : 8192 + i * 101, `batch-${i}.bin`));
+            const batchCount = 500;
+            const chunkBoundary = 16 * 1024 - 128;
+            const boundarySizes = new Map<number, number>([
+                [4, chunkBoundary - 1], [5, chunkBoundary], [6, chunkBoundary + 1],
+                [7, 64 * 1024 - 1], [8, 64 * 1024], [9, 64 * 1024 + 1],
+                [10, 1024 * 1024], [11, 1024 * 1024 + 123],
+            ]);
+            const specs = Array.from({ length: batchCount }, (_, i) => ({
+                name: i < 3 ? 'duplicate.bin' : i === 3 ? '資料-🧪-résumé.bin' : `batch-${i}.bin`,
+                size: i === 0 ? 0 : i === 1 ? 17 : i === 2 ? 31 : boundarySizes.get(i) ?? 1 + (i * 977) % 4096,
+                seed: (i * 13 + 7) % 251,
+            }));
+            const batchKey = (name: string, size: number) => `${name}\u0000${size}`;
+            if (new Set(specs.map(spec => batchKey(spec.name, spec.size))).size !== batchCount ||
+                specs.filter(spec => spec.name === 'duplicate.bin').length !== 3) {
+                throw new Error('The 500-file fixture did not generate unique contents with duplicate names');
+            }
+            const files = specs.map(spec => source(spec.size, spec.name, spec.seed));
+            const receivedBeforeBatch = peers[1].receivedFiles.length;
+            const queueBeforeBatch = peers[0].sendQueue.length;
+            const framesBeforeBatch = nativeDataFrameSizes.length;
             await peers[0].addFilesToQueue(files);
-            await until(() => peers[0].sendQueue.filter(f => f.status === 'sent').length === 121, '120-file queue');
-            if (peers[1].receivedFiles.length !== 121) throw new Error('Duplicate/missing received file');
-            for (const meta of peers[1].receivedFiles.slice(1)) await verify(meta);
-            append('PASS: 120-file queue, zero-byte file, exact file count and contents');
+            await until(() => {
+                const batch = peers[0].sendQueue.slice(queueBeforeBatch);
+                return batch.length === batchCount && batch.every(file => file.status === 'sent');
+            }, '500-file mixed queue', 300000);
+            const receivedBatch = peers[1].receivedFiles.slice(receivedBeforeBatch);
+            const batchQueue = peers[0].sendQueue.slice(queueBeforeBatch);
+            if (receivedBatch.length !== batchCount || new Set(receivedBatch.map(meta => meta.fileId)).size !== batchCount ||
+                new Set(batchQueue.map(file => file.id)).size !== batchCount) {
+                throw new Error(`Expected ${batchCount} unique sent/received IDs; got ${batchQueue.length}/${receivedBatch.length}`);
+            }
+            const metadataByNameAndSize = new Map(receivedBatch.map(meta => [batchKey(meta.name, meta.size), meta]));
+            if (metadataByNameAndSize.size !== batchCount) throw new Error('Duplicate/missing received filename and size pair');
+            for (const spec of specs) {
+                const meta = metadataByNameAndSize.get(batchKey(spec.name, spec.size));
+                if (!meta || meta.status !== 'complete' || meta.totalChunks !== Math.ceil(spec.size / (meta.chunkSize || chunkBoundary))) {
+                    throw new Error(`Invalid received metadata for ${spec.name} (${spec.size} bytes)`);
+                }
+                await verify(meta, spec.seed);
+            }
+            const batchFrames = nativeDataFrameSizes.slice(framesBeforeBatch);
+            const maxFrame = Math.max(0, ...batchFrames);
+            const negotiatedCaps = rtcPeers.map(pc => pc.sctp?.maxMessageSize)
+                .filter((cap): cap is number => typeof cap === 'number' && cap > 0 && Number.isFinite(cap));
+            if (!batchFrames.length || maxFrame > 16 * 1024 || !negotiatedCaps.length || maxFrame > Math.min(...negotiatedCaps)) {
+                throw new Error(`Native data frame/negotiated SCTP bound failed (max frame ${maxFrame}; caps ${negotiatedCaps.join(',') || 'unavailable'})`);
+            }
+            append(`PASS: ${batchCount} mixed files (empty, duplicate and Unicode names, 16/64 KiB boundaries, 1 MiB); IDs and bytes verified`);
+            append(`PASS: ${batchFrames.length} native data-channel frames stayed within 16 KiB and negotiated SCTP max ${Math.min(...negotiatedCaps)} bytes`);
+            const [photoBytes, videoBytes] = await Promise.all([
+                fetch('/peerlink-logo.png').then(response => { if (!response.ok) throw new Error('Photo fixture unavailable'); return response.arrayBuffer(); }),
+                fetch('/tests/peerlink-test-clip.mp4').then(response => { if (!response.ok) throw new Error('Video fixture unavailable'); return response.arrayBuffer(); }),
+            ]);
+            const photo = new Uint8Array(photoBytes), video = new Uint8Array(videoBytes);
+            if (photo[0] !== 0x89 || photo[1] !== 0x50 || video[4] !== 0x66 || video[5] !== 0x74 || video[6] !== 0x79 || video[7] !== 0x70) {
+                throw new Error('Media fixture signature check failed');
+            }
+            const [photoHash, videoHash] = await Promise.all([crypto.subtle.digest('SHA-256', photo), crypto.subtle.digest('SHA-256', video)]);
+            const mediaFiles = Array.from({ length: 500 }, (_, i) => i % 2 === 0
+                ? new File([photoBytes], `photo-${String(i).padStart(3, '0')}.png`, { type: 'image/png' })
+                : new File([videoBytes], `clip-${String(i).padStart(3, '0')}.mp4`, { type: 'video/mp4' }));
+            const mediaQueueStart = peers[0].sendQueue.length;
+            const mediaReceivedStart = peers[1].receivedFiles.length;
+            await peers[0].addFilesToQueue(mediaFiles);
+            await until(() => peers[0].sendQueue.slice(mediaQueueStart).length === mediaFiles.length &&
+                peers[0].sendQueue.slice(mediaQueueStart).every(file => file.status === 'sent') &&
+                peers[1].receivedFiles.length - mediaReceivedStart === mediaFiles.length, '500 photo/video files transfer');
+            const mediaQueue = peers[0].sendQueue.slice(mediaQueueStart);
+            const mediaReceived = peers[1].receivedFiles.slice(mediaReceivedStart);
+            if (new Set(mediaQueue.map(file => file.id)).size !== 500 || new Set(mediaReceived.map(file => file.fileId)).size !== 500) {
+                throw new Error('Photo/video transfer produced duplicate or missing IDs');
+            }
+            const mediaByName = new Map(mediaReceived.map(meta => [meta.name, meta]));
+            for (let i = 0; i < 500; i++) {
+                const isPhoto = i % 2 === 0;
+                const name = `${isPhoto ? 'photo' : 'clip'}-${String(i).padStart(3, '0')}.${isPhoto ? 'png' : 'mp4'}`;
+                const meta = mediaByName.get(name);
+                if (!meta || meta.size !== (isPhoto ? photo.length : video.length) || meta.mimeType !== (isPhoto ? 'image/png' : 'video/mp4')) {
+                    throw new Error(`Missing or mislabeled media file: ${name}`);
+                }
+                await verifyExactMedia(meta, isPhoto ? photo : video, isPhoto ? photoHash : videoHash);
+            }
+            append(`PASS: 500 valid photo/video files (250 PNG ${photo.length} B, 250 MP4 ${video.length} B); unique IDs, exact bytes and SHA-256 verified`);
             await peers[0].addFilesToQueue([source(8 * 1048576, 'pause.bin')]);
             await until(() => (peers[0].sendQueue.find(f => f.file.name === 'pause.bin')?.bytesTransferred ?? 0) > 0, 'pause transfer starts');
             const id = peers[0].sendQueue.at(-1)!.id;
@@ -316,13 +477,36 @@ function Tests() {
             if (peers[0].transferMetrics!.sentBytes !== sent) throw new Error('Sender continued while paused');
             peers[0].resumeSending(id);
             await until(() => peers[0].sendQueue.at(-1)?.status === 'sent', 'resume completes');
+            if (peers[0].sendQueue.find(file => file.file.name === 'pause.bin')?.id !== id) {
+                throw new Error('Pause/resume changed the active transfer ID');
+            }
             await verify(peers[1].receivedFiles.at(-1)!); append('PASS: pause/resume and exact contents');
             await peers[0].addFilesToQueue([source(16 * 1048576, 'cancel.bin'), source(17, 'after-cancel.bin')]);
             await until(() => (peers[0].sendQueue.find(f => f.file.name === 'cancel.bin')?.progress ?? 0) > 0, 'cancel starts');
             await peers[0].removeFromQueue(peers[0].sendQueue.find(f => f.file.name === 'cancel.bin')!.id);
             await until(() => peers[0].sendQueue.at(-1)?.status === 'sent', 'queue continues after cancel');
             if (peers[1].receivedFiles.some(f => f.name === 'cancel.bin')) throw new Error('Cancelled file marked complete');
+            const roomFilesAfterCancel = await getFilesInRoom(room);
+            if (roomFilesAfterCancel.some(meta => meta.name === 'cancel.bin' || meta.status === 'receiving')) {
+                throw new Error('Cancelled receive left a room row or partial metadata behind');
+            }
             await verify(peers[1].receivedFiles.at(-1)!); append('PASS: cancellation and next-file startup');
+            const retryQueueStart = peers[0].sendQueue.length;
+            failNextWorkerRead = true;
+            await peers[0].addFilesToQueue([source(16391, 'retry-fresh-id.bin', 89)]);
+            await untilWithoutFailureCheck(() => peers[0].sendQueue.slice(retryQueueStart).some(file => file.status === 'failed'),
+                'injected worker read failure');
+            const failedAttempt = peers[0].sendQueue.slice(retryQueueStart).find(file => file.status === 'failed');
+            if (!failedAttempt) throw new Error('Synthetic transfer did not fail before retry');
+            const failedAttemptId = failedAttempt.id;
+            peers[0].retrySending(failedAttemptId);
+            await untilWithoutFailureCheck(() => peers[0].sendQueue.some(file => file.file.name === 'retry-fresh-id.bin' &&
+                file.id !== failedAttemptId && file.status === 'sent'), 'retry with a fresh file ID');
+            const retried = peers[0].sendQueue.find(file => file.file.name === 'retry-fresh-id.bin' && file.id !== failedAttemptId)!;
+            const retriedMeta = peers[1].receivedFiles.find(meta => meta.name === 'retry-fresh-id.bin' && meta.size === 16391);
+            if (retried.id === failedAttemptId || !retriedMeta) throw new Error('Explicit retry did not use a fresh ID and produce a receiver file');
+            await verify(retriedMeta, 89);
+            append('PASS: a failed read retried with a fresh transfer ID and exact content');
             peers[0].sendChatMessage('integration chat');
             await until(() => peers[1].chatMessages.some(m => m.content === 'integration chat'), 'chat');
             append('PASS: chat');
