@@ -14,14 +14,46 @@ import {
 } from "./components";
 import { releasePreviewUrl, type FileMetadata } from "./ProgressDB";
 import { getFileMimeType } from "./utils/helpers";
-import type { QueuedFile } from "./types";
+import type { QueuedFile, RoomType, SignalingStatus } from "./types";
 import { registerPeerLinkServiceWorker } from "./serviceWorker";
 import { CircleAlert, CircleCheck, Copy, Info, LoaderCircle, RefreshCw, WifiOff, X } from "lucide-react";
 import { parseRoomInvite } from "./utils/roomInvite";
 
+function getRoomStatusCopy(status: SignalingStatus, roomType: RoomType, canRetryPeer: boolean) {
+  switch (status) {
+    case "unsupported":
+      return {
+        title: "Peer transfers unavailable in this browser",
+        message: roomType === "temporary"
+          ? "Temporary rooms need a browser with WebRTC support. Open PeerLink in a supported browser to transfer files."
+          : "Open PeerLink in a browser with WebRTC support to connect. Files already saved on this device remain available below.",
+      };
+    case "connecting":
+      return { title: "Connecting to room", message: "Checking the room and loading saved files." };
+    case "negotiating":
+      return { title: "Securing peer connection", message: "Establishing the peer connection." };
+    case "offline":
+      return { title: "Room is offline", message: "Stored files are ready to preview or download. Retry when you're ready to share." };
+    case "full":
+      return { title: "Room is full", message: "Rooms support up to two people. Saved files on this device remain available below." };
+    case "unreachable":
+      return {
+        title: "Could not connect to peer",
+        message: canRetryPeer
+          ? "The peer is in the room, but the connection could not be established. Retry from their room member row."
+          : "The peer is in the room, but the connection could not be established. Leave and reopen this room to retry.",
+      };
+    case "waiting":
+    case "idle":
+    default:
+      return { title: "Waiting for your peer", message: "Share the room ID to start transferring." };
+  }
+}
+
 function App() {
   const [appUpdateReady, setAppUpdateReady] = useState(false);
   const [copyingDiagnostics, setCopyingDiagnostics] = useState(false);
+  const [manualDiagnostics, setManualDiagnostics] = useState<string | null>(null);
   const serviceWorkerRegistration = useRef<ServiceWorkerRegistration | null>(null);
   const reloadAfterControlChange = useRef(false);
   const {
@@ -70,7 +102,9 @@ function App() {
     notifyError,
     getTransferDiagnostics,
   } = useP2P();
-  const retryablePeer = members.find((member) => member.status === "disconnected" && member.supportsReconnect === true);
+  const unsupportedBrowser = signalingStatus === "unsupported";
+  const canRetryPeer = members.some(member => member.status === "disconnected" && member.supportsReconnect === true);
+  const { title: roomStatusTitle, message: roomStatusMessage } = getRoomStatusCopy(signalingStatus, roomType, canRetryPeer);
   const inRoomRef = useRef(inRoom);
   inRoomRef.current = inRoom;
   const inviteAttempted = useRef(false);
@@ -176,11 +210,24 @@ function App() {
 
   const handleCopyDiagnostics = async () => {
     setCopyingDiagnostics(true);
+    setManualDiagnostics(null);
     try {
-      if (!navigator.clipboard?.writeText) throw new Error("Clipboard access is unavailable in this browser.");
-      const details = await getTransferDiagnostics();
-      await navigator.clipboard.writeText(JSON.stringify(details, null, 2));
-      notifyError("Connection details copied.", "success");
+      let details: unknown;
+      try {
+        details = await getTransferDiagnostics();
+      } catch (error) {
+        notifyError(`Unable to collect connection details: ${error instanceof Error ? error.message : String(error)}`);
+        return;
+      }
+      const serialized = JSON.stringify(details, null, 2);
+      try {
+        if (!navigator.clipboard?.writeText) throw new Error("Clipboard access is unavailable in this browser.");
+        await navigator.clipboard.writeText(serialized);
+        notifyError("Connection details copied.", "success");
+      } catch {
+        setManualDiagnostics(serialized);
+        notifyError("Connection details are ready below. Select and copy them manually.", "info");
+      }
     } catch (error) {
       notifyError(`Unable to copy connection details: ${error instanceof Error ? error.message : String(error)}`);
     } finally {
@@ -295,7 +342,7 @@ function App() {
           roomId={roomId}
           onRoomIdChange={setRoomId}
           onJoin={join}
-          onLeave={() => { handleClosePreview(); leaveRoom(); }}
+          onLeave={() => { setManualDiagnostics(null); handleClosePreview(); leaveRoom(); }}
           connected={connected}
           inRoom={inRoom}
           connectionType={connectionType}
@@ -308,23 +355,30 @@ function App() {
         {inRoom && (
           <>
             {!connected && (
-              <div className={`room-status ${signalingStatus === "offline" || signalingStatus === "full" || signalingStatus === "unreachable" ? "room-status-offline" : ""}`} role="status" aria-live="polite">
+              <div className={`room-status ${signalingStatus === "offline" || signalingStatus === "full" || signalingStatus === "unreachable" ? "room-status-offline" : unsupportedBrowser ? "room-status-local" : ""}`} role="status" aria-live="polite">
                 <div className="room-status-icon">
-                  {signalingStatus === "offline" || signalingStatus === "full" || signalingStatus === "unreachable" ? <WifiOff size={20} /> : <LoaderCircle size={20} className="room-status-spinner" />}
+                  {signalingStatus === "offline" || signalingStatus === "full" || signalingStatus === "unreachable" || unsupportedBrowser ? <WifiOff size={20} /> : <LoaderCircle size={20} className="room-status-spinner" />}
                 </div>
                 <div className="room-status-copy">
-                  <strong>{signalingStatus === "connecting" ? "Connecting to room" : signalingStatus === "negotiating" ? "Securing peer connection" : signalingStatus === "offline" ? "Room is offline" : signalingStatus === "full" ? "Room is full" : signalingStatus === "unreachable" ? "Could not connect to peer" : "Waiting for your peer"}</strong>
-                  <span>{signalingStatus === "full" ? "Rooms support up to two people. Saved files on this device remain available below." : signalingStatus === "offline" ? "Stored files are ready to preview or download. Reconnect when you're ready to share." : signalingStatus === "negotiating" ? "Establishing the peer connection." : signalingStatus === "unreachable" ? "The peer is in the room, but the connection could not be established." : signalingStatus === "connecting" ? "Checking the room and loading saved files." : "Share the room ID to start transferring."}</span>
+                  <strong>{roomStatusTitle}</strong>
+                  <span>{roomStatusMessage}</span>
                 </div>
                 {signalingStatus === "offline" && <button type="button" className="room-status-retry" onClick={retryConnection}><RefreshCw size={15} /> Retry</button>}
-                {signalingStatus === "unreachable" && retryablePeer && <button type="button" className="room-status-retry" onClick={() => retryPeerConnection(retryablePeer.peerId)}><RefreshCw size={15} /> Retry</button>}
-                <button type="button" className="room-status-retry diagnostics-copy" onClick={() => void handleCopyDiagnostics()} disabled={copyingDiagnostics}>
+                {!unsupportedBrowser && <button type="button" className="room-status-retry diagnostics-copy" onClick={() => void handleCopyDiagnostics()} disabled={copyingDiagnostics}>
                   <Copy size={15} aria-hidden="true" /> {copyingDiagnostics ? "Copying…" : "Copy connection details"}
-                </button>
+                </button>}
               </div>
             )}
 
-            {signalingStatus !== "full" && (
+            {manualDiagnostics && (
+              <section className="connection-details-fallback" aria-label="Manual connection details copy">
+                <label htmlFor="connection-details-text">Connection details — select and copy</label>
+                <textarea id="connection-details-text" readOnly value={manualDiagnostics} rows={6} onFocus={(event) => event.currentTarget.select()} />
+                <button type="button" className="btn btn-secondary btn-sm" onClick={() => setManualDiagnostics(null)}>Dismiss details</button>
+              </section>
+            )}
+
+            {signalingStatus !== "full" && !unsupportedBrowser && (
               <GroupMembers
                 members={members}
                 username={username}
@@ -334,14 +388,14 @@ function App() {
               />
             )}
 
-            {signalingStatus !== "full" && (
+            {signalingStatus !== "full" && !unsupportedBrowser && (
               <FileUploader
                 onFilesSelect={handleFilesSelect}
                 canSend={connected}
               />
             )}
 
-            {signalingStatus !== "full" && (
+            {signalingStatus !== "full" && !unsupportedBrowser && (
               <SendQueue
                 queue={sendQueue}
                 onPause={pauseSending}
@@ -353,7 +407,7 @@ function App() {
               />
             )}
 
-            {signalingStatus !== "full" && currentReceivings.length > 0 && (
+            {signalingStatus !== "full" && !unsupportedBrowser && currentReceivings.length > 0 && (
               <ReceiveProgress receivings={currentReceivings} />
             )}
 
