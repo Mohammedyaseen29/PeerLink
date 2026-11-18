@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { AlertCircle, Check, File, FolderOpen, Upload, X } from "lucide-react";
 import { formatBytes, getFileMimeType } from "../utils/helpers";
 import { FileThumbnail } from "./FileThumbnail";
+import "./transfer-workspace.css";
 
 interface FileUploaderProps {
     onFilesSelect: (files: File[]) => Promise<boolean>;
@@ -190,44 +191,48 @@ export function FileUploader({ onFilesSelect, canSend = false, disabled = false 
     return (
         <section className="file-uploader" aria-label="Choose files to send">
             <div
-                className={`drop-zone glass-card ${isDragOver ? "drag-over" : ""} ${disabled ? "disabled" : ""}`}
+                className={`drop-zone upload-tool ${isDragOver ? "drag-over" : ""} ${disabled ? "disabled" : ""}`}
                 onDragOver={handleDragOver}
                 onDragLeave={handleDragLeave}
                 onDrop={handleDrop}
                 aria-disabled={disabled}
             >
-                <Upload size={40} className="drop-icon" aria-hidden="true" />
-                <p className="drop-text">Drop files or folders to add them</p>
-                <p className="drop-subtext">Choose files or a folder below. Nothing sends until you select Send.</p>
-                {isReadingDrop && <p className="drop-subtext" role="status">Reading dropped folder…</p>}
-            </div>
+                <div className="upload-tool-copy">
+                    <span className="upload-tool-mark" aria-hidden="true"><Upload size={19} /></span>
+                    <div className="upload-tool-text">
+                        <p className="drop-text">Drop files or folders here</p>
+                        <p className="drop-subtext">Choose files to stage them. Nothing sends until you press Send.</p>
+                        {isReadingDrop && <p className="drop-subtext upload-reading" role="status">Reading dropped folder…</p>}
+                    </div>
+                </div>
 
-            <div className="upload-buttons">
-                <input ref={fileInputRef} type="file" multiple onChange={handleFileSelect} className="hidden" disabled={disabled} />
-                <button type="button" onClick={() => fileInputRef.current?.click()} className="btn btn-secondary" disabled={disabled}>
-                    <File size={18} aria-hidden="true" />
-                    <span>Select Files</span>
-                </button>
+                <div className="upload-buttons">
+                    <input ref={fileInputRef} type="file" multiple onChange={handleFileSelect} className="hidden" disabled={disabled} />
+                    <button type="button" onClick={() => fileInputRef.current?.click()} className="btn btn-primary upload-select-files" disabled={disabled}>
+                        <File size={18} aria-hidden="true" />
+                        <span>Select files</span>
+                    </button>
 
-                {supportsFolderPicker ? (
-                    <>
-                        <input
-                            ref={folderInputRef}
-                            type="file"
-                            multiple
-                            webkitdirectory="true"
-                            onChange={handleFileSelect}
-                            className="hidden"
-                            disabled={disabled}
-                        />
-                        <button type="button" onClick={() => folderInputRef.current?.click()} className="btn btn-secondary" disabled={disabled}>
-                            <FolderOpen size={18} aria-hidden="true" />
-                            <span>Select Folder</span>
-                        </button>
-                    </>
-                ) : (
-                    <p className="folder-fallback">Folder selection is unavailable here. Use Select Files to choose its contents.</p>
-                )}
+                    {supportsFolderPicker ? (
+                        <>
+                            <input
+                                ref={folderInputRef}
+                                type="file"
+                                multiple
+                                webkitdirectory="true"
+                                onChange={handleFileSelect}
+                                className="hidden"
+                                disabled={disabled}
+                            />
+                            <button type="button" onClick={() => folderInputRef.current?.click()} className="btn btn-secondary upload-select-folder" disabled={disabled}>
+                                <FolderOpen size={18} aria-hidden="true" />
+                                <span>Select folder</span>
+                            </button>
+                        </>
+                    ) : (
+                        <p className="folder-fallback">Folder picker unavailable in this browser.</p>
+                    )}
+                </div>
             </div>
 
             {staged.length > 0 && (

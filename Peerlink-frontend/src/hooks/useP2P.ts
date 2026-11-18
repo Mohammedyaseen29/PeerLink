@@ -1136,10 +1136,12 @@ export function useP2P() {
     const join = (newRoomId: string, newRoomType: RoomType = 'persistent') => {
         const room = newRoomId.trim();
         if (!room || ws.current) return;
+        const rtcAvailable = typeof RTCPeerConnection === 'function';
         const joinGeneration = ++roomJoinGeneration.current;
         currentRoom.current = room; temporary.current = newRoomType === 'temporary';
-        setRoomId(room); setRoomType(newRoomType); setInRoom(true); setHasPeer(false); setSignalingStatus('connecting');
+        setRoomId(room); setRoomType(newRoomType); setInRoom(true); setHasPeer(false); setSignalingStatus(rtcAvailable ? 'connecting' : 'unsupported');
         setSelfPeerId(''); selfPeerIdRef.current = ''; setMembers([]); setSelectedPeerIds([]); updateCurrentReceivings(() => []);
+        if (!rtcAvailable) { setConnected(false); setConnectionType('disconnected'); }
         replaceOnlineFiles([]); replaceReceivedFiles([]);
         // Begin the local lookup before the server replies so a full-room rejection
         // can still show files already saved for this room on this device.
@@ -1153,6 +1155,11 @@ export function useP2P() {
             if ('files' in result) replaceReceivedFiles(result.files);
             else showToast(`Unable to load saved room files: ${String(result.error)}`);
         };
+        if (!rtcAvailable) {
+            recordTransferDiagnostic('runtime_capability', 'rtcp_unavailable', { roomType: newRoomType });
+            if (newRoomType === 'persistent') void restoreSavedRoomFiles();
+            return;
+        }
         const socket = new WebSocket(import.meta.env.VITE_SIGNALING_SERVER_URL); ws.current = socket;
         let joinedRoom = false;
         let joinedProfileUpdated = false;

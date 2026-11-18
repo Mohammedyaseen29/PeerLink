@@ -14,14 +14,47 @@ import {
 } from "./components";
 import { releasePreviewUrl, type FileMetadata } from "./ProgressDB";
 import { getFileMimeType } from "./utils/helpers";
-import type { QueuedFile } from "./types";
+import type { QueuedFile, RoomType, SignalingStatus } from "./types";
 import { registerPeerLinkServiceWorker } from "./serviceWorker";
-import { CircleAlert, CircleCheck, Copy, Info, LoaderCircle, RefreshCw, WifiOff, X } from "lucide-react";
+import { CircleAlert, CircleCheck, Copy, Download, Info, LoaderCircle, RefreshCw, Upload, UserPlus, WifiOff, X } from "lucide-react";
 import { parseRoomInvite } from "./utils/roomInvite";
+import "./workspace.css";
+
+function getRoomStatusCopy(status: SignalingStatus, roomType: RoomType, canRetryPeer: boolean) {
+  switch (status) {
+    case "unsupported":
+      return {
+        title: "Peer transfers unavailable in this browser",
+        message: roomType === "temporary"
+          ? "Temporary rooms need a browser with WebRTC support. Open PeerLink in a supported browser to transfer files."
+          : "Open PeerLink in a browser with WebRTC support to connect. Files already saved on this device remain available below.",
+      };
+    case "connecting":
+      return { title: "Connecting to room", message: "Checking the room and loading saved files." };
+    case "negotiating":
+      return { title: "Connecting to your peer", message: "Both devices are in the room. Keep this page open while they connect." };
+    case "offline":
+      return { title: "Room is offline", message: "Stored files are ready to preview or download. Retry when you're ready to share." };
+    case "full":
+      return { title: "Room is full", message: "Rooms support up to two people. Saved files on this device remain available below." };
+    case "unreachable":
+      return {
+        title: "Could not connect to peer",
+        message: canRetryPeer
+          ? "The peer is in the room, but the connection could not be established. Retry from their room member row."
+          : "The peer is in the room, but the connection could not be established. Leave and reopen this room to retry.",
+      };
+    case "waiting":
+    case "idle":
+    default:
+      return { title: "Waiting for your peer", message: "Share the QR code or room ID with the other device." };
+  }
+}
 
 function App() {
   const [appUpdateReady, setAppUpdateReady] = useState(false);
   const [copyingDiagnostics, setCopyingDiagnostics] = useState(false);
+  const [manualDiagnostics, setManualDiagnostics] = useState<string | null>(null);
   const serviceWorkerRegistration = useRef<ServiceWorkerRegistration | null>(null);
   const reloadAfterControlChange = useRef(false);
   const {
@@ -70,7 +103,14 @@ function App() {
     notifyError,
     getTransferDiagnostics,
   } = useP2P();
-  const retryablePeer = members.find((member) => member.status === "disconnected" && member.supportsReconnect === true);
+  const unsupportedBrowser = signalingStatus === "unsupported";
+  const showTransferControls = !unsupportedBrowser && signalingStatus !== "full";
+  const showRoomMembers = showTransferControls && members.length > 0;
+  const canCopyConnectionDetails = signalingStatus === "negotiating" || signalingStatus === "offline" || signalingStatus === "unreachable";
+  const connectionProblem = signalingStatus === "offline" || signalingStatus === "full" || signalingStatus === "unreachable";
+  const RoomStatusIcon = connectionProblem || unsupportedBrowser ? WifiOff : signalingStatus === "waiting" ? UserPlus : LoaderCircle;
+  const canRetryPeer = members.some(member => member.status === "disconnected" && member.supportsReconnect === true);
+  const { title: roomStatusTitle, message: roomStatusMessage } = getRoomStatusCopy(signalingStatus, roomType, canRetryPeer);
   const inRoomRef = useRef(inRoom);
   inRoomRef.current = inRoom;
   const inviteAttempted = useRef(false);
@@ -176,11 +216,24 @@ function App() {
 
   const handleCopyDiagnostics = async () => {
     setCopyingDiagnostics(true);
+    setManualDiagnostics(null);
     try {
-      if (!navigator.clipboard?.writeText) throw new Error("Clipboard access is unavailable in this browser.");
-      const details = await getTransferDiagnostics();
-      await navigator.clipboard.writeText(JSON.stringify(details, null, 2));
-      notifyError("Connection details copied.", "success");
+      let details: unknown;
+      try {
+        details = await getTransferDiagnostics();
+      } catch (error) {
+        notifyError(`Unable to collect connection details: ${error instanceof Error ? error.message : String(error)}`);
+        return;
+      }
+      const serialized = JSON.stringify(details, null, 2);
+      try {
+        if (!navigator.clipboard?.writeText) throw new Error("Clipboard access is unavailable in this browser.");
+        await navigator.clipboard.writeText(serialized);
+        notifyError("Connection details copied.", "success");
+      } catch {
+        setManualDiagnostics(serialized);
+        notifyError("Connection details are ready below. Select and copy them manually.", "info");
+      }
     } catch (error) {
       notifyError(`Unable to copy connection details: ${error instanceof Error ? error.message : String(error)}`);
     } finally {
@@ -256,8 +309,8 @@ function App() {
   }, [receivedFiles, onlineFiles, sendQueue, previewFile]);
 
   return (
-    <div className="app-container">
-      <main className="main-content">
+    <div className="app-container peerlink-app">
+      <div className="main-content">
         <Header 
           onSettingsClick={() => setIsSettingsOpen(true)}
           onChatClick={() => setIsChatOpen(true)}
@@ -267,106 +320,120 @@ function App() {
           avatar={settings.avatar}
         />
 
-        {appUpdateReady && (
-          <div className="room-status app-update-banner" role="status" aria-live="polite">
-            <div className="room-status-icon"><RefreshCw size={20} /></div>
-            <div className="room-status-copy">
-              <strong>PeerLink update ready</strong>
-              <span>{inRoom ? "Leave the room after transfers finish to install the update." : "Install the latest version to keep room members on the same app version."}</span>
-            </div>
-            <button type="button" className="room-status-retry" disabled={inRoom} onClick={() => {
-              if (inRoom) return;
-              const waitingWorker = serviceWorkerRegistration.current?.waiting;
-              if (waitingWorker) {
-                reloadAfterControlChange.current = true;
-                waitingWorker.postMessage({ type: 'SKIP_WAITING' });
-              } else {
-                window.location.reload();
-              }
-            }}>
-              {inRoom ? 'Leave room to update' : 'Update now'}
-            </button>
-            <button type="button" className="toast-dismiss" onClick={() => setAppUpdateReady(false)} aria-label="Dismiss update notice"><X size={16} /></button>
-          </div>
-        )}
-
-        <RoomConnection
-          key={connectionFormKey}
-          roomId={roomId}
-          onRoomIdChange={setRoomId}
-          onJoin={join}
-          onLeave={() => { handleClosePreview(); leaveRoom(); }}
-          connected={connected}
-          inRoom={inRoom}
-          connectionType={connectionType}
-          signalingStatus={signalingStatus}
-          roomType={roomType}
-          generateRoomId={generateRoomId}
-          avatar={settings.avatar}
-        />
-
-        {inRoom && (
-          <>
-            {!connected && (
-              <div className={`room-status ${signalingStatus === "offline" || signalingStatus === "full" || signalingStatus === "unreachable" ? "room-status-offline" : ""}`} role="status" aria-live="polite">
-                <div className="room-status-icon">
-                  {signalingStatus === "offline" || signalingStatus === "full" || signalingStatus === "unreachable" ? <WifiOff size={20} /> : <LoaderCircle size={20} className="room-status-spinner" />}
-                </div>
-                <div className="room-status-copy">
-                  <strong>{signalingStatus === "connecting" ? "Connecting to room" : signalingStatus === "negotiating" ? "Securing peer connection" : signalingStatus === "offline" ? "Room is offline" : signalingStatus === "full" ? "Room is full" : signalingStatus === "unreachable" ? "Could not connect to peer" : "Waiting for your peer"}</strong>
-                  <span>{signalingStatus === "full" ? "Rooms support up to two people. Saved files on this device remain available below." : signalingStatus === "offline" ? "Stored files are ready to preview or download. Reconnect when you're ready to share." : signalingStatus === "negotiating" ? "Establishing the peer connection." : signalingStatus === "unreachable" ? "The peer is in the room, but the connection could not be established." : signalingStatus === "connecting" ? "Checking the room and loading saved files." : "Share the room ID to start transferring."}</span>
-                </div>
-                {signalingStatus === "offline" && <button type="button" className="room-status-retry" onClick={retryConnection}><RefreshCw size={15} /> Retry</button>}
-                {signalingStatus === "unreachable" && retryablePeer && <button type="button" className="room-status-retry" onClick={() => retryPeerConnection(retryablePeer.peerId)}><RefreshCw size={15} /> Retry</button>}
-                <button type="button" className="room-status-retry diagnostics-copy" onClick={() => void handleCopyDiagnostics()} disabled={copyingDiagnostics}>
-                  <Copy size={15} aria-hidden="true" /> {copyingDiagnostics ? "Copying…" : "Copy connection details"}
-                </button>
+        <main className="workspace-main">
+          {appUpdateReady && (
+            <div className="room-status app-update-banner" role="status" aria-live="polite">
+              <div className="room-status-icon"><RefreshCw size={20} /></div>
+              <div className="room-status-copy">
+                <strong>PeerLink update ready</strong>
+                <span>{inRoom ? "Leave the room after transfers finish to install the update." : "Install the latest version to keep room members on the same app version."}</span>
               </div>
-            )}
+              <button type="button" className="room-status-retry" disabled={inRoom} onClick={() => {
+                if (inRoom) return;
+                const waitingWorker = serviceWorkerRegistration.current?.waiting;
+                if (waitingWorker) {
+                  reloadAfterControlChange.current = true;
+                  waitingWorker.postMessage({ type: 'SKIP_WAITING' });
+                } else {
+                  window.location.reload();
+                }
+              }}>
+                {inRoom ? 'Leave room to update' : 'Update now'}
+              </button>
+              <button type="button" className="toast-dismiss" onClick={() => setAppUpdateReady(false)} aria-label="Dismiss update notice"><X size={16} /></button>
+            </div>
+          )}
 
-            {signalingStatus !== "full" && (
-              <GroupMembers
-                members={members}
-                username={username}
-                avatar={settings.avatar}
-                selfOnline={signalingStatus !== "offline"}
-                onRetryPeer={retryPeerConnection}
-              />
-            )}
+          <RoomConnection
+            key={connectionFormKey}
+            roomId={roomId}
+            onRoomIdChange={setRoomId}
+            onJoin={join}
+            onLeave={() => { setManualDiagnostics(null); handleClosePreview(); leaveRoom(); }}
+            connected={connected}
+            inRoom={inRoom}
+            connectionType={connectionType}
+            signalingStatus={signalingStatus}
+            roomType={roomType}
+            generateRoomId={generateRoomId}
+            avatar={settings.avatar}
+          />
 
-            {signalingStatus !== "full" && (
-              <FileUploader
-                onFilesSelect={handleFilesSelect}
-                canSend={connected}
-              />
-            )}
+          {inRoom && (
+            <>
+              {(!connected || showRoomMembers) && (
+                <div className={`workspace-room-state${!connected && showRoomMembers ? " workspace-room-state-split" : ""}`}>
+                  {!connected && (
+                    <section className={`room-status workspace-room-status ${connectionProblem ? "room-status-offline" : unsupportedBrowser ? "room-status-local" : ""}`} aria-label="Connection status">
+                      <div className="room-status-icon" aria-hidden="true">
+                        <RoomStatusIcon size={19} className={RoomStatusIcon === LoaderCircle ? "room-status-spinner" : undefined} />
+                      </div>
+                      <div className="room-status-copy" role="status" aria-live="polite">
+                        <strong>{roomStatusTitle}</strong>
+                        <span>{roomStatusMessage}</span>
+                      </div>
+                      {canCopyConnectionDetails && (
+                        <div className="workspace-status-actions">
+                          {signalingStatus === "offline" && <button type="button" className="room-status-retry" onClick={retryConnection}><RefreshCw size={15} aria-hidden="true" /> Retry</button>}
+                          <button type="button" className="room-status-retry diagnostics-copy" onClick={() => void handleCopyDiagnostics()} disabled={copyingDiagnostics}>
+                            <Copy size={15} aria-hidden="true" /> {copyingDiagnostics ? "Copying…" : "Copy connection details"}
+                          </button>
+                        </div>
+                      )}
+                    </section>
+                  )}
+                  {showRoomMembers && (
+                    <GroupMembers
+                      members={members}
+                      username={username}
+                      avatar={settings.avatar}
+                      selfOnline={signalingStatus !== "offline"}
+                      onRetryPeer={retryPeerConnection}
+                    />
+                  )}
+                </div>
+              )}
 
-            {signalingStatus !== "full" && (
-              <SendQueue
-                queue={sendQueue}
-                onPause={pauseSending}
-                onResume={resumeSending}
-                onRetry={retrySending}
-                onRemove={removeFromQueue}
-                onClearAll={clearAllQueue}
-                onPreview={handleQueuedPreview}
-              />
-            )}
+              {manualDiagnostics && (
+                <section className="connection-details-fallback" aria-label="Manual connection details copy">
+                  <label htmlFor="connection-details-text">Connection details — select and copy</label>
+                  <textarea id="connection-details-text" readOnly value={manualDiagnostics} rows={6} onFocus={(event) => event.currentTarget.select()} />
+                  <button type="button" className="btn btn-secondary btn-sm" onClick={() => setManualDiagnostics(null)}>Dismiss details</button>
+                </section>
+              )}
 
-            {signalingStatus !== "full" && currentReceivings.length > 0 && (
-              <ReceiveProgress receivings={currentReceivings} />
-            )}
-
-            <ReceivedFiles
-              files={receivedFiles}
-              onlineFiles={onlineFiles}
-              onDownload={downloadFile}
-              onPreview={handlePreview}
-              onDelete={deleteReceivedFile}
-              onClearRoom={clearRoom}
-            />
-          </>
-        )}
+              <div className={`transfer-workspace${showTransferControls ? "" : " transfer-workspace-single"}`}>
+                {showTransferControls && (
+                  <section className="transfer-column transfer-column-send" aria-labelledby="send-files-heading">
+                    <h2 className="workspace-section-heading" id="send-files-heading"><Upload size={18} aria-hidden="true" /> Send files</h2>
+                    <FileUploader onFilesSelect={handleFilesSelect} canSend={connected} />
+                    <SendQueue
+                      queue={sendQueue}
+                      onPause={pauseSending}
+                      onResume={resumeSending}
+                      onRetry={retrySending}
+                      onRemove={removeFromQueue}
+                      onClearAll={clearAllQueue}
+                      onPreview={handleQueuedPreview}
+                    />
+                  </section>
+                )}
+                <section className="transfer-column transfer-column-receive" aria-labelledby="received-files-heading">
+                  <h2 className="workspace-section-heading" id="received-files-heading"><Download size={18} aria-hidden="true" /> Received files</h2>
+                  {showTransferControls && currentReceivings.length > 0 && <ReceiveProgress receivings={currentReceivings} />}
+                  <ReceivedFiles
+                    files={receivedFiles}
+                    onlineFiles={onlineFiles}
+                    onDownload={downloadFile}
+                    onPreview={handlePreview}
+                    onDelete={deleteReceivedFile}
+                    onClearRoom={clearRoom}
+                  />
+                </section>
+              </div>
+            </>
+          )}
+        </main>
 
         {toast && (
           <div className="toast-overlay">
@@ -404,7 +471,7 @@ function App() {
           avatar={settings.avatar}
           onUpdateSettings={updateSettings}
         />
-      </main>
+      </div>
     </div>
   );
 }

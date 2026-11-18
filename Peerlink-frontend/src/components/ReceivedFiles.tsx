@@ -93,13 +93,13 @@ export function ReceivedFiles({ files, onlineFiles, onDownload, onPreview, onDel
                         </div>
                         <div className="file-actions">
                             {!online && (
-                                <button type="button" onClick={() => void handleDownload(file)} className="btn btn-primary btn-sm" disabled={isDownloading}>
+                                <button type="button" onClick={() => void handleDownload(file)} className="btn btn-primary btn-sm" disabled={isDownloading} aria-label={isDownloading ? `Downloading ${file.name}` : `Download ${file.name}`} title={isDownloading ? `Downloading ${file.name}` : `Download ${file.name}`}>
                                     {isDownloading ? <LoaderCircle size={16} className="download-spinner" aria-hidden="true" /> : <Download size={16} aria-hidden="true" />}
                                     <span>{isDownloading ? "Downloading…" : "Download"}</span>
                                 </button>
                             )}
                             {isPreviewable(file.mimeType) && (
-                                <button type="button" onClick={() => onPreview(file)} className="btn btn-secondary btn-sm">
+                                <button type="button" onClick={() => onPreview(file)} className="btn btn-secondary btn-sm" aria-label={`Preview ${file.name}`} title={`Preview ${file.name}`}>
                                     <Eye size={16} aria-hidden="true" /><span>Preview</span>
                                 </button>
                             )}

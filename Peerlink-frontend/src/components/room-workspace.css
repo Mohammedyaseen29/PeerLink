@@ -1,0 +1,77 @@
+.room-workspace-header { padding: 10px 0 6px; text-align: left; }
+.room-workspace-header .header-content { display: flex; flex-direction: row; align-items: center; justify-content: space-between; gap: 16px; position: static; }
+.room-workspace-header .header-actions { position: static; transform: none; display: flex; align-items: center; gap: 8px; margin: 0; }
+.room-workspace-brand { gap: 10px; }
+.room-workspace-mark { width: 40px; height: 40px; color: var(--info); border: 1px solid var(--border); border-radius: 10px; background: var(--bg-secondary); }
+.room-workspace-wordmark { color: var(--fg); font-size: 1.15rem; font-weight: 600; letter-spacing: -0.04em; }
+.room-workspace-identity { display: flex; align-items: center; gap: 8px; min-width: 0; padding: 4px 10px 4px 4px; border: 1px solid var(--border); border-radius: 999px; background: var(--bg-card); }
+.room-workspace-identity .username { max-width: 150px; overflow: hidden; color: var(--fg-secondary); font-size: 0.72rem; text-overflow: ellipsis; white-space: nowrap; }
+.room-workspace-header .header-settings-btn,
+.room-workspace-chat-btn { width: 44px; height: 44px; flex: 0 0 44px; border: 1px solid var(--border); border-radius: 10px; background: var(--bg-card); color: var(--fg-secondary); }
+.room-workspace-header .header-settings-btn:hover,
+.room-workspace-chat-btn:hover { border-color: var(--info); color: var(--fg); }
+.room-workspace-header button:focus-visible { outline: 2px solid var(--info); outline-offset: 2px; }
+
+.room-workspace-card { gap: 18px; padding: clamp(16px, 2vw, 24px); border-color: var(--border); background: var(--bg-card); }
+.room-workspace-home { display: flex; flex-direction: column; gap: 18px; padding: 0; text-align: left; }
+.room-workspace-home-heading { display: flex; flex-direction: column; gap: 4px; }
+.room-workspace-eyebrow { color: var(--info); font-size: 0.65rem; font-weight: 600; letter-spacing: 0.12em; line-height: 1.4; text-transform: uppercase; }
+.room-workspace-home .room-mode-title { margin: 0; color: var(--fg); font-size: 1.15rem; font-weight: 600; letter-spacing: -0.02em; text-transform: none; }
+.room-workspace-choices { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+.room-workspace-room .room-workspace-choice { display: grid; grid-template-columns: 44px minmax(0, 1fr); grid-template-areas: "icon title" "icon desc"; align-content: center; align-items: center; justify-items: start; gap: 3px 12px; min-width: 0; min-height: 96px; padding: 16px; border: 1px solid var(--border); border-radius: 12px; background: var(--bg-secondary); text-align: left; }
+.room-workspace-room .room-workspace-choice:hover { transform: translateY(-1px); border-color: rgba(144, 201, 255, 0.5); background: var(--bg-elevated); }
+.room-workspace-choice-icon { grid-area: icon; width: 40px; height: 40px; margin: 0; border: 1px solid rgba(144, 201, 255, 0.25); border-radius: 10px; background: rgba(144, 201, 255, 0.1); color: var(--info); }
+.room-workspace-choice .room-mode-label { grid-area: title; color: var(--fg); font-size: 0.85rem; }
+.room-workspace-choice .room-mode-desc { grid-area: desc; color: var(--fg-secondary); font-size: 0.68rem; line-height: 1.45; }
+.room-workspace-room .room-workspace-choice:focus-visible { outline: 2px solid var(--info); outline-offset: 2px; }
+
+.room-workspace-form { width: min(100%, 720px); align-self: center; gap: 14px; padding: 0; }
+.room-workspace-form-heading { display: grid; grid-template-columns: 88px minmax(0, 1fr); align-items: center; gap: 14px; padding-bottom: 12px; border-bottom: 1px solid var(--border); }
+.room-workspace-form-heading .back-btn { min-height: 44px; margin: 0; padding: 0 10px; border: 1px solid var(--border); border-radius: 9px; color: var(--fg-secondary); text-align: center; }
+.room-workspace-form-heading > div { display: flex; flex-direction: column; gap: 3px; }
+.room-workspace-form-heading h3 { color: var(--fg); font-size: 1rem; font-weight: 600; line-height: 1.35; }
+.room-workspace-type-selector { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; padding: 12px; background: var(--bg-primary); }
+.room-workspace-type-selector .room-type-label,
+.room-workspace-type-selector .room-type-hint { grid-column: 1 / -1; }
+.room-workspace-type-selector .room-type-options { display: contents; }
+.room-workspace-type-selector .room-type-btn { min-height: 44px; border-radius: 8px; background: var(--bg-secondary); color: var(--fg-secondary); }
+.room-workspace-type-selector .room-type-btn.active { border-color: var(--info); background: rgba(144, 201, 255, 0.12); color: var(--fg); }
+.room-workspace-form .room-field-group { display: flex; flex-direction: column; gap: 6px; }
+.room-workspace-form .room-field-label { color: var(--fg); font-size: 0.75rem; font-weight: 600; }
+.room-workspace-form .room-input { min-height: 46px; border-color: var(--border); border-radius: 9px; background: var(--bg-primary); color: var(--fg); }
+.room-workspace-form .room-input:focus { border-color: var(--info); box-shadow: 0 0 0 2px rgba(144, 201, 255, 0.15); }
+.room-workspace-form .room-field-hint { color: var(--fg-secondary); }
+.room-workspace-form .join-btn,
+.room-workspace-submit { min-height: 46px; border-radius: 9px; }
+.room-workspace-scan { min-height: 44px; border-radius: 9px; }
+
+.room-workspace-connected-info { display: flex; flex-direction: column; align-items: stretch; gap: 14px; padding: 0; }
+.room-workspace-id { display: block; width: 100%; min-width: 0; max-width: none; }
+.room-workspace-id-display { display: flex; flex-direction: column; align-items: stretch; gap: 7px; width: 100%; max-width: none; padding: 12px 14px; border-color: var(--border); border-radius: 10px; background: var(--bg-primary); }
+.room-workspace-id-label { display: block; color: var(--fg-secondary); font-size: 0.62rem; font-weight: 600; letter-spacing: 0.1em; line-height: 1.3; text-transform: uppercase; white-space: nowrap; }
+.room-workspace-id-line { display: flex; align-items: center; gap: 10px; min-width: 0; width: 100%; }
+.room-workspace-room .room-workspace-id-value { display: block; flex: 1 1 auto; min-width: 0; width: 100%; overflow: visible; color: var(--fg); font: 0.82rem/1.5 var(--font-mono); overflow-wrap: anywhere; text-overflow: clip; white-space: normal; word-break: break-word; }
+.room-workspace-copy { display: inline-flex; align-items: center; justify-content: center; flex: 0 0 44px; width: 44px; height: 44px; min-height: 44px; border: 1px solid var(--border); border-radius: 9px; background: var(--bg-secondary); color: var(--fg); }
+.room-workspace-toolbar { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-start; gap: 8px; padding-top: 12px; border-top: 1px solid var(--border); }
+.room-workspace-type-badge { min-height: 36px; padding: 7px 11px; border: 1px solid var(--border); border-radius: 999px; background: var(--bg-secondary); color: var(--fg-secondary); font-size: 0.7rem; }
+.room-workspace-type-badge.temporary { border-color: rgba(252, 211, 77, 0.3); background: rgba(252, 211, 77, 0.08); color: var(--warning); }
+.room-workspace-qr,
+.room-workspace-leave { min-height: 44px; border-radius: 9px; }
+.room-workspace-toolbar .connection-indicator { min-height: 44px; border: 1px solid var(--border); background: var(--bg-primary); }
+.room-workspace-leave { margin-left: auto; color: var(--fg-secondary); white-space: nowrap; }
+.room-workspace-room :is(button, input):focus-visible { outline: 2px solid var(--info); outline-offset: 2px; }
+
+@media (max-width: 620px) {
+    .room-workspace-header { padding: 6px 0 2px; }
+    .room-workspace-header-content { gap: 8px; }
+    .room-workspace-mark { width: 36px; height: 36px; }
+    .room-workspace-wordmark { font-size: 1rem; }
+    .room-workspace-identity { padding-right: 4px; }
+    .room-workspace-identity .username { display: none; }
+    .room-workspace-choices { grid-template-columns: 1fr; }
+    .room-workspace-room .room-workspace-choice { min-height: 82px; }
+    .room-workspace-form-heading { grid-template-columns: 72px minmax(0, 1fr); gap: 10px; }
+    .room-workspace-type-selector { gap: 7px; }
+    .room-workspace-toolbar { justify-content: flex-start; }
+    .room-workspace-leave { margin-left: 0; }
+}

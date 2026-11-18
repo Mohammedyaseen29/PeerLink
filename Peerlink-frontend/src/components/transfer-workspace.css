@@ -1,0 +1,259 @@
+.transfer-workspace {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    align-items: start;
+    gap: clamp(0.9rem, 1.8vw, 1.25rem);
+    min-width: 0;
+}
+
+.transfer-workspace-single {
+    grid-template-columns: minmax(0, 1fr);
+}
+
+.transfer-column {
+    --transfer-accent: var(--info);
+    min-width: 0;
+    padding: clamp(0.9rem, 1.8vw, 1.25rem);
+    border: 1px solid var(--border);
+    border-radius: 16px;
+    background: linear-gradient(155deg, rgba(144, 201, 255, 0.075), var(--bg-card) 42%);
+    box-shadow: 0 16px 38px rgba(0, 0, 0, 0.16);
+}
+
+.transfer-column-send {
+    --transfer-accent: var(--info);
+    border-color: rgba(144, 201, 255, 0.24);
+    background: linear-gradient(150deg, rgba(72, 132, 190, 0.13), var(--bg-card) 46%);
+}
+
+.transfer-column-receive {
+    --transfer-accent: var(--success);
+    border-color: rgba(110, 231, 183, 0.23);
+    background: linear-gradient(150deg, rgba(48, 140, 110, 0.12), var(--bg-card) 46%);
+}
+
+.transfer-column .workspace-section-heading {
+    display: flex;
+    align-items: center;
+    gap: 0.6rem;
+    margin: 0 0 1rem;
+    color: var(--fg);
+}
+
+.transfer-column .workspace-section-heading svg {
+    color: var(--transfer-accent);
+}
+
+.transfer-column-receive .received-files {
+    padding: 0;
+    border: 0;
+    background: transparent;
+}
+
+.transfer-column-receive .files-list {
+    grid-template-columns: minmax(0, 1fr);
+}
+
+.transfer-column-receive .file-item {
+    display: grid;
+    grid-template-columns: 44px minmax(0, 1fr);
+    align-items: start;
+}
+
+.transfer-column-receive .file-item .file-actions {
+    grid-column: 1 / -1;
+    width: auto;
+}
+
+.transfer-column-receive .empty-state {
+    margin-top: 0.65rem;
+    padding: 1.25rem 0.75rem;
+    border: 1px dashed var(--border);
+    border-radius: 12px;
+    color: var(--fg-secondary);
+}
+
+.transfer-column-receive .empty-subtext {
+    opacity: 1;
+}
+
+.file-uploader {
+    min-width: 0;
+    gap: 0.85rem;
+}
+
+.file-uploader .upload-tool {
+    display: flex;
+    flex-direction: column;
+    align-items: stretch;
+    gap: 1rem;
+    padding: clamp(0.9rem, 1.6vw, 1.2rem);
+    border: 1px solid rgba(144, 201, 255, 0.19);
+    border-radius: 13px;
+    background: linear-gradient(125deg, rgba(144, 201, 255, 0.075), rgba(17, 27, 39, 0.7) 75%);
+    cursor: default;
+    transition: border-color var(--transition-fast), background var(--transition-fast), box-shadow var(--transition-fast);
+}
+
+.upload-tool:hover:not(.disabled),
+.upload-tool.drag-over {
+    border-color: rgba(144, 201, 255, 0.58);
+    background: linear-gradient(125deg, rgba(144, 201, 255, 0.12), rgba(17, 27, 39, 0.86) 75%);
+}
+
+.upload-tool.drag-over {
+    box-shadow: 0 0 0 3px rgba(144, 201, 255, 0.09);
+}
+
+.upload-tool.disabled {
+    opacity: 0.48;
+}
+
+.upload-tool-copy {
+    display: flex;
+    align-items: center;
+    gap: 0.85rem;
+    min-width: 0;
+}
+
+.upload-tool-mark {
+    display: grid;
+    place-items: center;
+    width: 42px;
+    height: 42px;
+    flex: 0 0 42px;
+    border: 1px solid rgba(144, 201, 255, 0.18);
+    border-radius: 12px;
+    background: rgba(144, 201, 255, 0.1);
+    color: var(--info);
+}
+
+.upload-tool-text {
+    min-width: 0;
+}
+
+.upload-tool .drop-text {
+    color: var(--fg);
+    font-size: 0.84rem;
+    font-weight: 600;
+    line-height: 1.4;
+}
+
+.upload-tool .drop-subtext {
+    margin-top: 0.25rem;
+    color: var(--fg-secondary);
+    font-size: 0.68rem;
+    line-height: 1.5;
+}
+
+.upload-tool .upload-reading {
+    color: var(--info);
+}
+
+.transfer-column .upload-buttons {
+    display: flex;
+    flex: 0 0 auto;
+    align-items: center;
+    justify-content: flex-start;
+    gap: 0.55rem;
+    flex-wrap: wrap;
+}
+
+.transfer-column .upload-buttons .btn {
+    min-height: 46px;
+    flex: 0 0 auto;
+    padding: 0.65rem 0.85rem;
+    font-size: 0.72rem;
+}
+
+.transfer-column .upload-select-files {
+    background: #dceeff;
+    color: #0d1b29;
+}
+
+.transfer-column .upload-select-files:hover:not(:disabled) {
+    background: #edf6ff;
+}
+
+.transfer-column .upload-select-folder {
+    border-color: rgba(173, 187, 205, 0.23);
+    background: rgba(19, 28, 39, 0.7);
+}
+
+.transfer-column .folder-fallback {
+    max-width: 12rem;
+    color: var(--fg-muted);
+    font-size: 0.63rem;
+    line-height: 1.4;
+}
+
+.file-uploader .staged-files {
+    display: flex;
+    flex-direction: column;
+    gap: 0.8rem;
+    min-width: 0;
+    padding: 0.9rem;
+    border: 1px solid var(--border);
+    border-radius: 13px;
+    background: rgba(10, 16, 24, 0.5);
+}
+
+.file-uploader .staged-header {
+    align-items: center;
+}
+
+.file-uploader .staged-header .section-title {
+    color: var(--fg);
+    font-size: 0.78rem;
+}
+
+.file-uploader .staged-item {
+    border-color: rgba(132, 149, 173, 0.16);
+    background: rgba(25, 37, 52, 0.72);
+}
+
+.file-uploader .staged-send-row {
+    border-color: rgba(132, 149, 173, 0.18);
+}
+
+.file-uploader .staged-send {
+    min-height: 46px;
+}
+
+@media (max-width: 900px) {
+    .transfer-workspace {
+        grid-template-columns: minmax(0, 1fr);
+    }
+}
+
+@media (max-width: 620px) {
+    .transfer-column {
+        padding: 0.85rem;
+    }
+
+    .upload-tool-copy {
+        align-items: flex-start;
+    }
+
+    .transfer-column .upload-buttons {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(min(100%, 9rem), 1fr));
+        width: 100%;
+    }
+
+    .transfer-column .upload-buttons .btn {
+        width: 100%;
+        min-height: 48px;
+    }
+
+    .transfer-column .folder-fallback {
+        grid-column: 1 / -1;
+        max-width: none;
+    }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .upload-tool {
+        transition: none;
+    }
+}

@@ -1,0 +1,107 @@
+.peerlink-app {
+    --bg-primary: #0b1017;
+    --bg-card: #131c27;
+    --bg-secondary: #192534;
+    --bg-elevated: #223247;
+    --border: #2c3b50;
+    --border-hover: #425773;
+    --fg: #edf3fb;
+    --fg-secondary: #adbbcd;
+    --fg-muted: #8495ad;
+    --accent: #859ab6;
+    --info: #90c9ff;
+    background: radial-gradient(ellipse at 50% 0%, #182b43 0, transparent 33rem), var(--bg-primary);
+    color: var(--fg);
+}
+
+.peerlink-app .main-content {
+    max-width: 1160px;
+    padding: 0 28px 48px;
+    gap: 24px;
+}
+
+.workspace-main {
+    min-width: 0;
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    align-items: start;
+    gap: 18px;
+}
+
+.workspace-room-state {
+    min-width: 0;
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    gap: 14px;
+}
+
+.peerlink-app .workspace-room-status {
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr);
+    align-items: center;
+    gap: 8px 12px;
+    padding: 14px 16px;
+    border-color: var(--border);
+    border-radius: 10px;
+    background: var(--bg-card);
+}
+
+.workspace-room-status .room-status-copy strong {
+    font-size: 0.875rem;
+}
+
+.workspace-room-status .room-status-copy span {
+    font-size: 0.75rem;
+}
+
+.workspace-status-actions {
+    grid-column: 2 / -1;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    min-width: 0;
+}
+
+.workspace-status-actions .room-status-retry {
+    min-width: 0;
+    margin: 0;
+    text-align: left;
+}
+
+.workspace-room-state .group-members {
+    min-width: 0;
+    padding: 14px 16px;
+    border-radius: 10px;
+}
+
+.workspace-section-heading {
+    margin: 0;
+    display: flex;
+    align-items: center;
+    gap: 9px;
+    color: var(--fg);
+    font-size: 1rem;
+    line-height: 1.35;
+    font-weight: 600;
+}
+
+.workspace-section-heading svg {
+    flex-shrink: 0;
+    color: var(--info);
+}
+
+@media (min-width: 960px) {
+    .workspace-room-state-split {
+        grid-template-columns: minmax(0, 1.2fr) minmax(0, 1fr);
+    }
+}
+
+@media (max-width: 640px) {
+    .peerlink-app .main-content { padding: 0 14px 32px; gap: 16px; }
+    .workspace-main { gap: 14px; }
+    .workspace-section-heading { font-size: 0.9375rem; }
+}
+
+@media (max-width: 400px) {
+    .workspace-status-actions { grid-column: 1 / -1; }
+}
