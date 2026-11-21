@@ -28,6 +28,8 @@ export type FileMetadata = {
   /** Whether this received copy may be re-advertised to room peers. */
   sharedWithRoom?: boolean;
   sourcePeerId?: string;
+  /** Sender's transfer ID, used to match a received copy to its peer catalog entry. */
+  sourceFileId?: string;
   sourceName?: string;
   /** Present only on transient remote catalog entries. */
   remoteFileId?: string;

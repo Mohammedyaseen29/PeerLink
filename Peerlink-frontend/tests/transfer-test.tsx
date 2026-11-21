@@ -366,6 +366,21 @@ function Tests() {
             peers[1].join(room);
             await until(() => peers.every(peer => peer.connected), 'both data channels');
             append('Connected: ' + peers.map(peer => peer.connectionType).join(', '));
+            if (new URLSearchParams(location.search).has('background')) {
+                const identities = peers.map(peer => peer.selfPeerId);
+                const connections = rtcPeers.length;
+                window.dispatchEvent(new PageTransitionEvent('pagehide', { persisted: false }));
+                append('Waiting 45 seconds in a simulated native-file-picker lifecycle…');
+                await delay(45_000);
+                window.dispatchEvent(new PageTransitionEvent('pageshow', { persisted: false }));
+                window.dispatchEvent(new Event('focus'));
+                document.dispatchEvent(new Event('resume'));
+                await delay(250);
+                if (!peers.every((peer, i) => peer.inRoom && peer.connected && peer.selfPeerId === identities[i]) || rtcPeers.length !== connections) {
+                    throw new Error('Background/file-picker lifecycle ended an active room or replaced a healthy connection');
+                }
+                append('PASS: 45-second file-picker lifecycle preserved both room memberships, peer IDs, and RTC connections');
+            }
             const sizeMiB = new URLSearchParams(location.search).has('quick') ? 8 : 128;
             const big = source(sizeMiB * 1024 * 1024 + 123, 'large-test.bin');
             await peers[0].addFilesToQueue([big]);

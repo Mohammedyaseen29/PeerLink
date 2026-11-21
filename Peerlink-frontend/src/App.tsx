@@ -19,6 +19,7 @@ import { registerPeerLinkServiceWorker } from "./serviceWorker";
 import { CircleAlert, CircleCheck, Copy, FolderOpen, Info, LoaderCircle, MessageCircle, RefreshCw, ShieldCheck, UserPlus, WifiOff, X } from "lucide-react";
 import { parseRoomInvite } from "./utils/roomInvite";
 import { BrandMark } from "./components/BrandMark";
+import { isReceivedCopy } from "./utils/receivedFiles";
 
 function getRoomStatusCopy(status: SignalingStatus, roomType: RoomType, canRetryPeer: boolean) {
   switch (status) {
@@ -205,6 +206,7 @@ function App() {
 
   const [previewFile, setPreviewFile] = useState<FileMetadata | null>(null);
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
+  const [previewError, setPreviewError] = useState<string | null>(null);
   const previewRequest = useRef(0);
   useEffect(() => () => { previewRequest.current++; }, []);
   useEffect(() => () => { if (previewUrl) void releasePreviewUrl(previewUrl); }, [previewUrl]);
@@ -243,18 +245,21 @@ function App() {
 
   const handlePreview = async (file: FileMetadata) => {
     const request = ++previewRequest.current;
+    setPreviewFile(file);
+    setPreviewUrl(null);
+    setPreviewError(null);
     try {
       const url = await openPreview(file);
       if (request !== previewRequest.current) { void releasePreviewUrl(url); return; }
-      setPreviewFile(file);
       setPreviewUrl(url);
     } catch (error) {
-      if (request === previewRequest.current) notifyError(error instanceof Error ? error.message : String(error));
+      if (request === previewRequest.current) setPreviewError(error instanceof Error ? error.message : String(error));
     }
   };
 
   const handleQueuedPreview = (queuedFile: QueuedFile) => {
     previewRequest.current++;
+    setPreviewError(null);
     const { file, id } = queuedFile;
     const mimeType = getFileMimeType(file);
     const previewBlob = mimeType === file.type ? file : file.slice(0, file.size, mimeType);
@@ -279,17 +284,8 @@ function App() {
     if (previewFile) closePreview(previewFile.fileId);
     setPreviewFile(null);
     setPreviewUrl(null);
+    setPreviewError(null);
   };
-
-  useEffect(() => {
-    if (!previewFile || !previewUrl?.includes("/__peerlink_preview/")) return;
-    if (onlineFiles.some((file) => file.fileId === previewFile.fileId)) return;
-    previewRequest.current++;
-    closePreview(previewFile.fileId);
-    void releasePreviewUrl(previewUrl);
-    setPreviewFile(null);
-    setPreviewUrl(null);
-  }, [onlineFiles, previewFile, previewUrl, closePreview]);
 
   useEffect(() => {
     if (!previewFile) return;
@@ -302,8 +298,16 @@ function App() {
       setPreviewUrl(null);
       return;
     }
+    if (previewFile.remoteFileId) {
+      const local = receivedFiles.find(file => isReceivedCopy(file, previewFile));
+      if (local) { void handlePreview(local); return; }
+    }
     if (!onlineFiles.some(file => file.fileId === previewFile.fileId) &&
-        !receivedFiles.some(file => file.fileId === previewFile.fileId)) handleClosePreview();
+        !receivedFiles.some(file => file.fileId === previewFile.fileId)) {
+      const local = receivedFiles.find(file => isReceivedCopy(file, previewFile));
+      if (local) void handlePreview(local);
+      else handleClosePreview();
+    }
   // Close a local preview if its stored file was deleted.
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [receivedFiles, onlineFiles, sendQueue, previewFile]);
@@ -416,7 +420,7 @@ function App() {
         <span className="toast-icon">{toast.kind === "success" ? <CircleCheck size={20} /> : toast.kind === "info" ? <Info size={20} /> : <CircleAlert size={20} />}</span>
         <span className="toast-message-text">{toast.message}</span><button type="button" className="toast-dismiss" onClick={dismissToast} aria-label="Dismiss notification"><X size={16} /></button>
       </div></div>}
-      {previewFile && <FilePreviewModal file={previewFile} previewUrl={previewUrl} onClose={handleClosePreview} />}
+      {previewFile && <FilePreviewModal file={previewFile} previewUrl={previewUrl} error={previewError} onRetry={() => void handlePreview(previewFile)} onError={setPreviewError} onClose={handleClosePreview} />}
       <ChatPanel isOpen={isChatOpen} onClose={() => setIsChatOpen(false)} messages={chatMessages} selfPeerId={selfPeerId} username={username} avatar={settings.avatar} onSendMessage={sendChatMessage} connected={connected} roomId={inRoom ? roomId : ""} members={members} />
       <SettingsModal isOpen={isSettingsOpen} onClose={() => setIsSettingsOpen(false)} settings={settings} username={username} avatar={settings.avatar} onUpdateSettings={updateSettings} />
     </div>

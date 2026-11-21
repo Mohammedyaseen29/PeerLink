@@ -184,7 +184,7 @@ export class TransferEngine {
                 throw new Error('This transfer uses unsupported metadata. Update PeerLink on both devices and retry.');
             }
             const localId = crypto.randomUUID();
-            const meta: FileMetadata = { fileId: localId, sourcePeerId: this.source.peerId, sourceName: this.source.peerName,
+            const meta: FileMetadata = { fileId: localId, sourcePeerId: this.source.peerId, sourceFileId: fileId, sourceName: this.source.peerName,
                 sharedWithRoom: msg.sharedWithRoom === true, name, size: Number(size), totalChunks: Number(totalChunks), chunkSize: Number(chunkSize),
                 roomId: this.room(), roomType: this.roomType(), path: path || undefined,
                 mimeType: typeof msg.mimeType === 'string' ? msg.mimeType : '', receivedChunks: 0, status: 'receiving', createdAt: Date.now() };

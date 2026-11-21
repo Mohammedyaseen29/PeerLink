@@ -452,6 +452,46 @@ async function handlePreviewRequest(event: FetchEvent, request: Request, url: UR
 
     const metadata = validateBrokerReply(reply, start, end)
     if (!metadata) return emptyResponse(502)
+    if (!request.headers.has('Range')) {
+      const headers = previewHeaders(metadata.mimeType)
+      headers.set('Content-Length', String(metadata.size))
+      if (request.method === 'HEAD' || metadata.size === 0) return new Response(null, { status: 200, headers })
+
+      // Images and documents normally request the whole resource, not a Range.
+      // Stream bounded peer ranges instead of rejecting them or buffering the entire file.
+      const controller = new AbortController()
+      const onAbort = () => controller.abort()
+      request.signal.addEventListener('abort', onAbort, { once: true })
+      let finishLifetime!: () => void
+      event.waitUntil(new Promise<void>(resolve => { finishLifetime = resolve }))
+      let offset = 0
+      let first: ArrayBuffer | null = metadata.data
+      const finish = () => {
+        request.signal.removeEventListener('abort', onAbort)
+        finishLifetime()
+      }
+      const body = new ReadableStream<Uint8Array>({
+        async pull(stream) {
+          try {
+            if (request.signal.aborted || controller.signal.aborted) throw new DOMException('Preview canceled', 'AbortError')
+            const rangeEnd = Math.min(offset + MAX_RANGE_BYTES, metadata.size) - 1
+            const reply = first ? null : await askPage(client as WindowClient, controller.signal, fileId, offset, rangeEnd)
+            const next = first ? metadata : validateBrokerReply(reply, offset, rangeEnd)
+            if (!next || next.size !== metadata.size || next.mimeType !== metadata.mimeType) throw new Error('The peer preview changed or became unavailable.')
+            first = null
+            stream.enqueue(new Uint8Array(next.data))
+            offset += next.data.byteLength
+            if (offset >= metadata.size) { stream.close(); finish() }
+          } catch (error) {
+            controller.abort()
+            stream.error(error)
+            finish()
+          }
+        },
+        cancel() { controller.abort(); finish() }
+      })
+      return new Response(body, { status: 200, headers })
+    }
     if (!range || start >= metadata.size) {
       return emptyResponse(416, `bytes */${metadata.size}`, metadata.mimeType)
     }

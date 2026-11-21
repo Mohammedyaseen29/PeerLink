@@ -714,20 +714,6 @@ export function useP2P() {
         };
     }, [disconnectPeer, requestRemoteRange, showToast]);
 
-    useEffect(() => {
-        const onPageHide = (event: PageTransitionEvent) => {
-            if (event.persisted) return;
-            if (ws.current?.readyState === WebSocket.OPEN) {
-                try { ws.current.send(JSON.stringify({ type: 'leave', roomId: currentRoom.current })); } catch { /* Best effort on tab close. */ }
-            }
-            clearSignalingMonitor.current(); ws.current?.close();
-            for (const session of [...sessions.current.values()]) session.dispose?.(false);
-            if (temporary.current && currentRoom.current) void clearTemporaryFiles(currentRoom.current).catch(() => undefined);
-        };
-        window.addEventListener('pagehide', onPageHide);
-        return () => window.removeEventListener('pagehide', onPageHide);
-    }, []);
-
     const publishSessionCatalog = (session: PeerSession, force = false) => {
         if (session.control?.readyState !== 'open') return;
         const sources = new Map<string, SharedSource>();
@@ -1287,6 +1273,8 @@ export function useP2P() {
             if (heartbeatTimer !== undefined) window.clearInterval(heartbeatTimer);
             heartbeatTimer = undefined;
             window.removeEventListener('focus', onWindowFocus);
+            window.removeEventListener('pageshow', onWindowFocus);
+            document.removeEventListener('resume', onWindowFocus);
             document.removeEventListener('visibilitychange', onVisibilityChange);
             for (const peerId of recovery.keys()) clearRecovery(peerId);
             if (clearSignalingMonitor.current === clearMonitoring) clearSignalingMonitor.current = () => undefined;
@@ -1351,7 +1339,15 @@ export function useP2P() {
             try { send({ type: 'heartbeat', roomId: room }); send({ type: 'sync', roomId: room }); }
             catch { /* The WebSocket close event owns room membership cleanup. */ }
         };
-        const onWindowFocus = () => { socket.wake(); requestRoomSync(); };
+        const onWindowFocus = () => {
+            // Returning from a native file picker/background state is not a leave.
+            socket.wake(); requestRoomSync();
+            for (const member of roomPeers.values()) {
+                const session = sessions.current.get(member.peerId);
+                const state = recovery.get(member.peerId);
+                if ((!session || session.status === 'disconnected') && !state?.inFlight) retryPeerRef.current(member.peerId);
+            }
+        };
         const onVisibilityChange = () => { if (document.visibilityState === 'visible') onWindowFocus(); };
         const startMonitoring = () => {
             if (heartbeatTimer !== undefined) return;
@@ -1360,6 +1356,8 @@ export function useP2P() {
                 requestRoomSync();
             }, SIGNALING_HEARTBEAT_INTERVAL_MS);
             window.addEventListener('focus', onWindowFocus);
+            window.addEventListener('pageshow', onWindowFocus);
+            document.addEventListener('resume', onWindowFocus);
             document.addEventListener('visibilitychange', onVisibilityChange);
         };
         let startReconnect = (_peerId: string) => undefined;
@@ -1889,9 +1887,12 @@ export function useP2P() {
         if (wasTemporary) void clearTemporaryFiles(room).catch(error => showToast(`Unable to remove temporary files: ${String(error)}`));
     };
     const openPreview = async (file: FileMetadata) => {
-        if (!onlineFilesRef.current.some(onlineFile => onlineFile === file)) {
+        const remote = onlineFilesRef.current.find(onlineFile => onlineFile.fileId === file.fileId &&
+            onlineFile.sourcePeerId === file.sourcePeerId && onlineFile.remoteFileId === file.remoteFileId);
+        if (!file.remoteFileId) {
             return getUpdatePreviewUrl(file.fileId, file, null);
         }
+        if (!remote) throw new Error('This file is no longer shared by the peer.');
         await waitForPreviewServiceWorker();
         if (!onlineFilesRef.current.some(onlineFile => onlineFile.fileId === file.fileId)) {
             throw new Error('This file is no longer shared by the peer.');
