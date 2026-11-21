@@ -1,5 +1,8 @@
 # Transfer validation
 
+- `/tests/large-transfer-bounded.html`: explicit **Run bounded checks** creates a 33 MiB + 123 byte disk-backed source, runs the actual sender worker/receiver engine, verifies all bytes and packed storage, tests sparse 4 GiB/50 GB/50 GiB offsets and legacy/corrupt records, and checks local worker preview ranges. **Verify attachment stream** independently verifies the packed download route without native download UI. No automatic large write. See [large-transfer-storage.md](../docs/large-transfer-storage.md).
+- `node --test tests/large-transfer.test.mjs tests/preview-http.test.mjs`: bounded VM coverage of packing, high-offset source reads, preview HTTP/abort/security, old worker compatibility, progress watchdog and durable receiver ACK/error/cancel behavior.
+
 ## Run locally
 
 From `edge/signaling-server`, run `node node_modules/wrangler/bin/wrangler.js dev --local --port 8787`.

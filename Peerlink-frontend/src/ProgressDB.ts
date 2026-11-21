@@ -1,4 +1,5 @@
-import { downloadWithServiceWorker } from './download/serviceWorkerDownload';
+import { downloadWithServiceWorker, localPreviewUrl } from './download/serviceWorkerDownload';
+import { checkPreviewSize, MAX_TEXT_PREVIEW_BYTES, safePreviewMime } from './previewPolicy';
 
 export const DB_NAME = "PeerLink_files";
 export const DB_VERSION = 4;
@@ -8,9 +9,6 @@ export const FILE_STORE = "files";
 const LARGE_PREVIEW_THRESHOLD = 32 * 1024 * 1024;
 const MAX_FILE_RANGE_BYTES = 1024 * 1024;
 const MAX_BLOB_DOWNLOAD_BYTES = 32 * 1024 * 1024;
-const PREVIEW_STALE_AGE_MS = 24 * 60 * 60 * 1000;
-const MAX_PREVIEW_CLEANUP_ENTRIES = 512;
-const PREVIEW_FILE_PREFIX = ".peerlink-preview-";
 
 export type FileMetadata = {
   fileId: string;
@@ -22,6 +20,8 @@ export type FileMetadata = {
   mimeType: string;
   totalChunks: number;
   chunkSize?: number;
+  /** Missing on existing files, which retain one row per wire chunk. */
+  storageFormat?: 'extent-v1';
   receivedChunks: number;
   status: "receiving" | "complete" | "paused";
   createdAt: number;
@@ -102,19 +102,51 @@ export async function saveChunk(fileId: string, chunkIndex: number, data: ArrayB
   })
 }
 
-/** Persist a group of received chunks in one IndexedDB transaction. */
+/** Pack only this committed wire batch. Partial/timer batches never wait for a full extent. */
+export function storageRows(fileId: string, chunks: ReadonlyArray<{ chunkIndex: number; data: ArrayBuffer }>, metadata?: FileMetadata) {
+  if (metadata?.storageFormat !== 'extent-v1') return chunks.map(chunk => ({ fileId, ...chunk }));
+  const chunkSize = metadata.chunkSize;
+  if (!Number.isSafeInteger(chunkSize) || !chunkSize || chunkSize < 1 || chunkSize > MAX_FILE_RANGE_BYTES) {
+    throw new Error('Invalid extent chunk size.');
+  }
+  const rows: Array<{ fileId: string; chunkIndex: number; chunkCount: number; data: ArrayBuffer }> = [];
+  let first = 0;
+  while (first < chunks.length) {
+    let last = first;
+    let length = 0;
+    while (last < chunks.length) {
+      const chunk = chunks[last];
+      if (!Number.isSafeInteger(chunk.chunkIndex) || chunk.chunkIndex < 0 || chunk.chunkIndex >= metadata.totalChunks ||
+          (last > 0 && chunk.chunkIndex !== chunks[last - 1].chunkIndex + 1) || !(chunk.data instanceof ArrayBuffer) ||
+          chunk.data.byteLength !== Math.min(chunkSize, metadata.size - chunk.chunkIndex * chunkSize)) {
+        throw new Error('Invalid or non-contiguous extent batch.');
+      }
+      if (length + chunk.data.byteLength > MAX_FILE_RANGE_BYTES) break;
+      length += chunk.data.byteLength;
+      last++;
+    }
+    const data = new Uint8Array(length);
+    let offset = 0;
+    for (let i = first; i < last; i++) { data.set(new Uint8Array(chunks[i].data), offset); offset += chunks[i].data.byteLength; }
+    rows.push({ fileId, chunkIndex: chunks[first].chunkIndex, chunkCount: last - first, data: data.buffer });
+    first = last;
+  }
+  return rows;
+}
+
+/** Persist a group of received chunks and its progress atomically. */
 export async function saveChunks(
   fileId: string,
   chunks: ReadonlyArray<{ chunkIndex: number; data: ArrayBuffer }>,
   metadata?: FileMetadata
 ): Promise<void> {
   if (chunks.length === 0) return;
-
+  const rows = storageRows(fileId, chunks, metadata);
   const db = await openDB();
   const tx = db.transaction(metadata ? [CHUNK_STORE, FILE_STORE] : CHUNK_STORE, "readwrite");
   const store = tx.objectStore(CHUNK_STORE);
-  for (const chunk of chunks) {
-    store.put({ fileId, chunkIndex: chunk.chunkIndex, data: chunk.data });
+  for (const chunk of rows) {
+    store.put(chunk);
   }
   if (metadata) tx.objectStore(FILE_STORE).put(metadata);
 
@@ -200,63 +232,73 @@ export async function readFileRange(
     throw new Error("The file has invalid chunk-size metadata.");
   }
 
+  if (metadata.storageFormat !== undefined && metadata.storageFormat !== 'extent-v1') throw new Error("Unsupported file storage format.");
   const actualEnd = Math.min(end, metadata.size - 1);
   const output = new Uint8Array(actualEnd - start + 1);
   const firstIndex = Math.floor(start / chunkSize);
   const lastIndex = Math.floor(actualEnd / chunkSize);
   return new Promise<ArrayBuffer>((resolve, reject) => {
     const tx = db.transaction(CHUNK_STORE, "readonly");
-    const range = IDBKeyRange.bound([fileId, firstIndex], [fileId, lastIndex]);
-    const request = tx.objectStore(CHUNK_STORE).openCursor(range);
+    const store = tx.objectStore(CHUNK_STORE);
     let expectedIndex = firstIndex;
     let outputOffset = 0;
-    let cursorDone = false;
     let settled = false;
+    let done = false;
     const fail = (error: unknown) => {
       if (settled) return;
       settled = true;
       try { tx.abort(); } catch { /* The transaction may already be inactive. */ }
       reject(error instanceof Error ? error : new Error(String(error)));
     };
-
-    request.onsuccess = () => {
-      const cursor = request.result;
-      if (!cursor) {
-        cursorDone = true;
-        return;
-      }
-
-      const record = cursor.value as { fileId?: unknown; chunkIndex?: unknown; data?: unknown };
-      if (record.fileId !== fileId || record.chunkIndex !== expectedIndex || !(record.data instanceof ArrayBuffer)) {
-        fail(new Error(`File chunk ${expectedIndex} is missing or invalid.`));
-        return;
-      }
-      const chunkIndex = expectedIndex++;
-      const chunk = record.data;
-      const expectedSize = Math.min(chunkSize, metadata.size - chunkIndex * chunkSize);
-      if (chunk.byteLength !== expectedSize) {
-        fail(new Error(`File chunk ${chunkIndex} has an unexpected size.`));
-        return;
-      }
-      const chunkStart = chunkIndex * chunkSize;
-      const copyStart = Math.max(start, chunkStart) - chunkStart;
-      const copyEnd = Math.min(actualEnd + 1, chunkStart + chunk.byteLength) - chunkStart;
-      const slice = new Uint8Array(chunk, copyStart, copyEnd - copyStart);
-      output.set(slice, outputOffset);
-      outputOffset += slice.byteLength;
-      cursor.continue();
+    const scan = (first: number) => {
+      expectedIndex = first;
+      const request = store.openCursor(IDBKeyRange.bound([fileId, first], [fileId, lastIndex]));
+      request.onerror = () => fail(request.error ?? new Error("Unable to read file extents."));
+      request.onsuccess = () => {
+        const cursor = request.result;
+        if (!cursor) { done = true; return; }
+        const row = cursor.value as { fileId?: unknown; chunkIndex?: unknown; chunkCount?: number; data?: unknown };
+        const count = metadata.storageFormat === 'extent-v1' ? row.chunkCount : 1;
+        if (row.fileId !== fileId || row.chunkIndex !== expectedIndex || !Number.isSafeInteger(count) || !count || count < 1 ||
+            expectedIndex + count > metadata.totalChunks || !(row.data instanceof ArrayBuffer) || row.data.byteLength > MAX_FILE_RANGE_BYTES) {
+          fail(new Error('File extent at chunk ' + expectedIndex + ' is missing or invalid.')); return;
+        }
+        const rowStart = expectedIndex * chunkSize;
+        const rowEnd = Math.min((expectedIndex + count) * chunkSize, metadata.size);
+        if (row.data.byteLength !== rowEnd - rowStart || rowEnd <= start) {
+          fail(new Error('File extent at chunk ' + expectedIndex + ' has an unexpected size.')); return;
+        }
+        const copyStart = Math.max(start, rowStart);
+        const copyEnd = Math.min(actualEnd + 1, rowEnd);
+        if (copyEnd > copyStart) {
+          output.set(new Uint8Array(row.data, copyStart - rowStart, copyEnd - copyStart), outputOffset);
+          outputOffset += copyEnd - copyStart;
+        }
+        expectedIndex += count;
+        cursor.continue();
+      };
     };
-    request.onerror = () => fail(request.error ?? new Error("Unable to read file chunks."));
+    if (metadata.storageFormat === 'extent-v1') {
+      // Locate one predecessor key without cloning its bytes, then scan this bounded range.
+      const preceding = store.openKeyCursor(IDBKeyRange.bound([fileId, 0], [fileId, firstIndex]), 'prev');
+      preceding.onerror = () => fail(preceding.error ?? new Error("Unable to locate file extent."));
+      preceding.onsuccess = () => {
+        const key = preceding.result?.primaryKey as [string, number] | undefined;
+        if (!key || key[0] !== fileId || !Number.isSafeInteger(key[1])) {
+          fail(new Error("The requested file range has a missing extent.")); return;
+        }
+        scan(key[1]);
+      };
+    } else scan(firstIndex);
     tx.oncomplete = () => {
       if (settled) return;
-      if (!cursorDone || expectedIndex <= lastIndex || outputOffset !== output.byteLength) {
-        fail(new Error("The requested file range is incomplete."));
-        return;
+      if (!done || expectedIndex <= lastIndex || outputOffset !== output.byteLength) {
+        fail(new Error("The requested file range is incomplete.")); return;
       }
       settled = true;
       resolve(output.buffer);
     };
-    tx.onerror = () => fail(tx.error ?? new Error("Unable to read file chunks."));
+    tx.onerror = () => fail(tx.error ?? new Error("Unable to read file extents."));
     tx.onabort = () => fail(tx.error ?? new DOMException("File range read was aborted.", "AbortError"));
   });
 }
@@ -290,7 +332,7 @@ export const getLastChunkIndex = async (
       const cursor = req.result;
 
       if (cursor) {
-        resolve(cursor.value.chunkIndex);
+        resolve(cursor.value.chunkIndex + (cursor.value.chunkCount || 1) - 1);
       } else {
         resolve(null);
       }
@@ -300,6 +342,7 @@ export const getLastChunkIndex = async (
   });
 };
 
+/** Enumerates logical wire indices; diagnostic helper, unsuitable for a complete multi-million-chunk file. */
 export const getChunkIndices = async (fileId: string): Promise<number[]> => {
   const db = await openDB();
   const tx = db.transaction(CHUNK_STORE, "readonly");
@@ -312,7 +355,7 @@ export const getChunkIndices = async (fileId: string): Promise<number[]> => {
     req.onsuccess = () => {
       const cursor = req.result;
       if (cursor) {
-        chunkIndices.push(cursor.value.chunkIndex);
+        for (let i = 0; i < (cursor.value.chunkCount || 1); i++) chunkIndices.push(cursor.value.chunkIndex + i);
         cursor.continue();
       } else {
         resolve(chunkIndices.sort((a, b) => a - b));
@@ -352,7 +395,7 @@ export const streamFileToDownload = async (
     return;
   }
   if (metadata.size > MAX_BLOB_DOWNLOAD_BYTES) {
-    await downloadWithServiceWorker(fileId, options.name || metadata.name, metadata.size);
+    await downloadWithServiceWorker(fileId, options.name || metadata.name, metadata.size, metadata.storageFormat);
     return;
   }
 
@@ -417,18 +460,7 @@ export async function deleteFile(fileId: string): Promise<void> {
   const db = await openDB();
   const tx = db.transaction([FILE_STORE, CHUNK_STORE], "readwrite");
   tx.objectStore(FILE_STORE).delete(fileId);
-  const store = tx.objectStore(CHUNK_STORE);
-  const index = store.index("fileId");
-
-  const cursorReq = index.openCursor(IDBKeyRange.only(fileId));
-
-  cursorReq.onsuccess = () => {
-    const cursor = cursorReq.result;
-    if (cursor) {
-      cursor.delete();
-      cursor.continue();
-    }
-  };
+  tx.objectStore(CHUNK_STORE).delete(IDBKeyRange.bound([fileId, 0], [fileId, Number.MAX_SAFE_INTEGER]));
 
   await new Promise<void>((resolve, reject) => {
     tx.oncomplete = () => resolve();
@@ -437,253 +469,50 @@ export async function deleteFile(fileId: string): Promise<void> {
   });
 }
 
-type StagedPreview = {
-  directory: FileSystemDirectoryHandle;
-  fileName: string;
-  releaseLock: (() => void) | null;
-};
-
-const stagedPreviews = new Map<string, StagedPreview>();
-let stalePreviewCleanup: Promise<void> | null = null;
-
-function previewLockName(fileName: string): string {
-  return `peerlink-preview:${fileName}`;
-}
-
-async function holdPreviewFileLock(fileName: string): Promise<(() => void) | null> {
-  const lockManager = navigator.locks;
-  if (typeof lockManager?.request !== "function") return null;
-
-  let unlock!: () => void;
-  let resolveAcquired!: () => void;
-  let rejectAcquired!: (error: unknown) => void;
-  const acquired = new Promise<void>((resolve, reject) => {
-    resolveAcquired = resolve;
-    rejectAcquired = reject;
-  });
-  const held = new Promise<void>((resolve) => { unlock = resolve; });
-  const request = lockManager.request(previewLockName(fileName), { mode: "exclusive" }, async (lock) => {
-    if (!lock) {
-      rejectAcquired(new Error("Unable to protect the active preview file."));
-      return;
-    }
-    resolveAcquired();
-    await held;
-  });
-  void request.catch(rejectAcquired);
-  await acquired;
-
-  let released = false;
-  return () => {
-    if (released) return;
-    released = true;
-    unlock();
-  };
-}
-
-async function removeStalePreviewFiles(directory: FileSystemDirectoryHandle): Promise<void> {
-  const lockManager = navigator.locks;
-  if (typeof lockManager?.request !== "function") return;
-  const entries = (directory as FileSystemDirectoryHandle & {
-    entries?: () => AsyncIterableIterator<[string, FileSystemHandle]>;
-  }).entries;
-  if (typeof entries !== "function") return;
-
-  let inspected = 0;
-  const now = Date.now();
-  for await (const [fileName, handle] of entries.call(directory)) {
-    if (inspected++ >= MAX_PREVIEW_CLEANUP_ENTRIES) break;
-    if (handle.kind !== "file" || !fileName.startsWith(PREVIEW_FILE_PREFIX)) continue;
-
-    const timestamp = Number(/^\.peerlink-preview-(\d+)-/.exec(fileName)?.[1]);
-    if (!Number.isSafeInteger(timestamp) || now - timestamp <= PREVIEW_STALE_AGE_MS) continue;
-
-    try {
-      await lockManager.request(previewLockName(fileName), { mode: "exclusive", ifAvailable: true }, async (lock) => {
-        if (!lock) return;
-        try {
-          await directory.removeEntry(fileName);
-        } catch (error) {
-          if (!(error instanceof DOMException) || error.name !== "NotFoundError") {
-            console.warn("Unable to remove stale preview file:", error);
-          }
-        }
-      });
-    } catch (error) {
-      console.warn("Unable to check stale preview file:", error);
-    }
-  }
-}
-
-function cleanupStalePreviewFilesOnce(directory: FileSystemDirectoryHandle): Promise<void> {
-  if (!stalePreviewCleanup) {
-    stalePreviewCleanup = removeStalePreviewFiles(directory).catch((error) => {
-      console.warn("Unable to clean stale preview files:", error);
-    });
-  }
-  return stalePreviewCleanup;
-}
-
+/** Local worker preview URLs own no staged files. */
 export async function releasePreviewUrl(url: string): Promise<void> {
-  URL.revokeObjectURL(url);
-  const staged = stagedPreviews.get(url);
-  if (!staged) return;
-
-  stagedPreviews.delete(url);
-  try {
-    await staged.directory.removeEntry(staged.fileName);
-  } catch (error) {
-    if (!(error instanceof DOMException) || error.name !== "NotFoundError") {
-      console.warn("Unable to remove temporary preview file:", error);
-    }
-  } finally {
-    staged.releaseLock?.();
-  }
+  if (url.startsWith('blob:')) URL.revokeObjectURL(url);
 }
 
-function errorWithPreviewStorageContext(error: unknown): Error {
-  if (error instanceof Error && error.name === "QuotaExceededError") {
-    return new Error("There is not enough browser storage available to stage this preview. Free storage space and try again.");
-  }
-  return error instanceof Error ? error : new Error(String(error));
-}
-
-function readPreviewChunk(db: IDBDatabase, fileId: string, index: number): Promise<ArrayBuffer> {
-  return new Promise((resolve, reject) => {
-    const request = db.transaction(CHUNK_STORE, "readonly").objectStore(CHUNK_STORE).get([fileId, index]);
-    request.onsuccess = () => {
-      const data = (request.result as { data?: unknown } | undefined)?.data;
-      if (data instanceof ArrayBuffer) resolve(data);
-      else reject(new Error(`Preview chunk ${index} is missing or invalid.`));
-    };
-    request.onerror = () => reject(request.error);
-  });
-}
-
-async function createStagedPreviewUrl(
-  fileId: string,
-  metadata: FileMetadata,
-  db: IDBDatabase
-): Promise<string> {
-  if (!navigator.storage || typeof navigator.storage.getDirectory !== "function") {
-    throw new Error("Large-file previews require browser support for the origin-private file system (OPFS) in a secure context.");
-  }
-  if (metadata.status !== "complete" || !Number.isSafeInteger(metadata.size) || metadata.size <= LARGE_PREVIEW_THRESHOLD ||
-      !Number.isSafeInteger(metadata.totalChunks) || metadata.totalChunks < 1 || metadata.receivedChunks !== metadata.totalChunks) {
-    throw new Error("The file is incomplete or has invalid chunk metadata, so it cannot be previewed.");
-  }
-
-  let fileChunkSize = metadata.chunkSize;
-  if (fileChunkSize !== undefined && (!Number.isSafeInteger(fileChunkSize) || fileChunkSize < 1)) {
-    throw new Error("The file has invalid chunk-size metadata and cannot be previewed.");
-  }
-
-  let root: FileSystemDirectoryHandle | null = null;
-  let fileName: string | null = null;
-  let writable: FileSystemWritableFileStream | null = null;
-  let releaseLock: (() => void) | null = null;
-  let objectUrl: string | null = null;
-  try {
-    root = await navigator.storage.getDirectory();
-    await cleanupStalePreviewFilesOnce(root);
-    const uniqueId = typeof globalThis.crypto?.randomUUID === "function"
-      ? globalThis.crypto.randomUUID()
-      : `${Date.now()}-${Math.random().toString(36).slice(2)}`;
-    fileName = `${PREVIEW_FILE_PREFIX}${Date.now()}-${uniqueId}`;
-    releaseLock = await holdPreviewFileLock(fileName);
-    const handle = await root.getFileHandle(fileName, { create: true });
-    writable = await handle.createWritable();
-
-    let written = 0;
-    for (let index = 0; index < metadata.totalChunks; index++) {
-      const chunk = await readPreviewChunk(db, fileId, index);
-      if (fileChunkSize === undefined) {
-        fileChunkSize = chunk.byteLength;
-        if (!Number.isSafeInteger(fileChunkSize) || fileChunkSize < 1) {
-          throw new Error("The file has an empty or invalid preview chunk.");
-        }
-      }
-
-      const expectedChunkCount = Math.ceil(metadata.size / fileChunkSize);
-      const expectedChunkSize = index < metadata.totalChunks - 1
-        ? fileChunkSize
-        : metadata.size - fileChunkSize * (metadata.totalChunks - 1);
-      if (expectedChunkCount !== metadata.totalChunks || expectedChunkSize < 1 || chunk.byteLength !== expectedChunkSize) {
-        throw new Error(`Preview chunk ${index} has an unexpected size.`);
-      }
-
-      await writable.write(chunk);
-      written += chunk.byteLength;
-    }
-
-    if (written !== metadata.size) throw new Error("The staged preview size does not match the file metadata.");
-    await writable.close();
-    writable = null;
-
-    const stagedFile = await handle.getFile();
-    const contentType = metadata.mimeType || stagedFile.type;
-    const previewFile = stagedFile.type === contentType
-      ? stagedFile
-      : new File([stagedFile], metadata.name, { type: contentType, lastModified: stagedFile.lastModified });
-    objectUrl = URL.createObjectURL(previewFile);
-    stagedPreviews.set(objectUrl, { directory: root, fileName, releaseLock });
-    releaseLock = null;
-    return objectUrl;
-  } catch (error) {
-    if (objectUrl) URL.revokeObjectURL(objectUrl);
-    if (writable) {
-      try { await writable.abort(); } catch { /* The staging file is removed below. */ }
-    }
-    if (root && fileName) {
-      try { await root.removeEntry(fileName); } catch { /* Preserve the original staging error. */ }
-    }
-    releaseLock?.();
-    throw errorWithPreviewStorageContext(error);
-  }
-}
-
-export async function getUpdatePreviewUrl(
-  fileId: string,
-  metadata: FileMetadata,
-  previewBlob: string | null
-): Promise<string> {
-  try {
-    const db = await openDB();
-    if (metadata.size > LARGE_PREVIEW_THRESHOLD) {
-      const url = await createStagedPreviewUrl(fileId, metadata, db);
-      if (previewBlob) void releasePreviewUrl(previewBlob);
-      return url;
-    }
-
-    const chunks: Blob[] = [];
-    
-    for (let i = 0; i < metadata.receivedChunks; i++) {
-      const tx = db.transaction(CHUNK_STORE, "readonly");
-      const store = tx.objectStore(CHUNK_STORE);
-      const req = store.get([fileId, i]);
-
-      const chunk = await new Promise<ArrayBuffer>((resolve, reject) => {
-        req.onsuccess = () => {
-          if (req.result) resolve(req.result.data);
-          else reject(new Error(`Chunk ${i} missing`));
-        };
-        req.onerror = () => reject(req.error);
+let legacyPreviewCleanup: Promise<void> | undefined;
+/** Reclaim crash leftovers from older versions without touching a live old tab's preview. */
+function cleanupLegacyPreviews(): Promise<void> {
+  return legacyPreviewCleanup ??= (async () => {
+    if (!navigator.locks?.request || !navigator.storage?.getDirectory) return;
+    const root = await navigator.storage.getDirectory();
+    const entries = (root as FileSystemDirectoryHandle & { entries?: () => AsyncIterableIterator<[string, FileSystemHandle]> }).entries;
+    if (!entries) return;
+    let inspected = 0;
+    for await (const [name, handle] of entries.call(root)) {
+      if (inspected++ >= 512) break;
+      if (handle.kind !== 'file') continue;
+      const match = /^\.peerlink-preview-(\d+)-/.exec(name);
+      if (!match || !Number.isSafeInteger(Number(match[1])) || Date.now() - Number(match[1]) <= 24 * 60 * 60 * 1000) continue;
+      await navigator.locks.request(`peerlink-preview:${name}`, { mode: 'exclusive', ifAvailable: true }, async lock => {
+        if (lock) await root.removeEntry(name).catch(() => undefined);
       });
-
-      chunks.push(new Blob([chunk]));
     }
+  })().catch(() => undefined);
+}
 
-    const blob = new Blob(chunks, { type: metadata.mimeType });
-    const url = URL.createObjectURL(blob);
-
-    if (previewBlob) void releasePreviewUrl(previewBlob);
-    
-    return url;
-  } catch (err) {
-    console.error("Preview update failed:", err);
-    throw err;
+export async function getUpdatePreviewUrl(fileId: string, metadata: FileMetadata, previewBlob: string | null): Promise<string> {
+  checkPreviewSize(metadata);
+  if (metadata.status !== 'complete') throw new Error('This file is incomplete. Finish receiving it before previewing.');
+  let url: string;
+  if (metadata.size > LARGE_PREVIEW_THRESHOLD) {
+    void cleanupLegacyPreviews();
+    url = await localPreviewUrl(fileId);
+  } else {
+    const size = metadata.mimeType.startsWith('text/') ? Math.min(metadata.size, MAX_TEXT_PREVIEW_BYTES) : metadata.size;
+    const chunks: ArrayBuffer[] = [];
+    for (let start = 0; start < size; start += MAX_FILE_RANGE_BYTES) {
+      chunks.push(await readFileRange(fileId, metadata, start, Math.min(size, start + MAX_FILE_RANGE_BYTES) - 1));
+    }
+    url = URL.createObjectURL(new Blob(chunks, { type: safePreviewMime(metadata.mimeType) }));
   }
-} 
+  if (previewBlob) void releasePreviewUrl(previewBlob);
+  return url;
+}
 
 export async function savePartialSendState(
   roomId: string,

@@ -6,6 +6,7 @@ import { NavigationRoute, registerRoute } from 'workbox-routing'
 import { cleanupOutdatedCaches, createHandlerBoundToURL, precacheAndRoute } from 'workbox-precaching'
 import { CacheFirst } from 'workbox-strategies'
 import { getMetaData, readFileRange, type FileMetadata } from './ProgressDB'
+import { checkPreviewSize, MAX_TEXT_PREVIEW_BYTES, safePreviewMime } from './previewPolicy'
 
 const MAX_RANGE_BYTES = 1024 * 1024
 const BROKER_TIMEOUT_MS = 30_000
@@ -13,6 +14,7 @@ const DOWNLOAD_PATH = /^\/__peerlink_download\/([A-Za-z0-9_-]{16,128})$/
 const DOWNLOAD_TOKEN_TTL_MS = 5 * 60_000
 const MAX_DOWNLOAD_TOKENS = 32
 const PREVIEW_PATH = /^\/__peerlink_preview\/[^/]+$/
+const LOCAL_PREVIEW_PATH = /^\/__peerlink_local_preview\/([^/]+)$/
 const MIME_TYPE_PATTERN = /^[\w!#$&^_.+-]+\/[\w!#$&^_.+-]+(?:\s*;\s*[\w!#$&^_.+-]+=(?:"[^"\r\n]*"|[\w!#$&^_.+-]+))*$/
 
 type PrecacheEntry = string | {
@@ -101,7 +103,7 @@ sw.addEventListener('message', (event) => {
   } else if (event.data && typeof event.data === 'object' && event.data.type === 'PEERLINK_DOWNLOAD_CAPABILITY') {
     const port = event.ports[0]
     if (!port) return
-    try { port.postMessage({ type: 'PEERLINK_DOWNLOAD_CAPABILITY_ACK', version: 1 }) }
+    try { port.postMessage({ type: 'PEERLINK_DOWNLOAD_CAPABILITY_ACK', version: 2 }) }
     finally { port.close() }
   }
 })
@@ -149,9 +151,10 @@ function previewHeaders(mimeType?: string): Headers {
     'Cache-Control': 'private, no-store, max-age=0',
     Expires: '0',
     Pragma: 'no-cache',
-    'X-Content-Type-Options': 'nosniff'
+    'X-Content-Type-Options': 'nosniff',
+    'Content-Security-Policy': "sandbox; default-src 'none'; media-src 'self' blob:; img-src 'self' blob:; style-src 'unsafe-inline'"
   })
-  if (mimeType) headers.set('Content-Type', mimeType)
+  if (mimeType) headers.set('Content-Type', safePreviewMime(mimeType))
   return headers
 }
 
@@ -224,10 +227,10 @@ function attachmentHeaders(name: string, size: number): Headers {
   })
 }
 
-async function notifyDownloadOwner(value: DownloadToken, type: string, message?: string): Promise<void> {
+async function notifyDownloadOwner(value: DownloadToken, type: string, message?: string, bytes?: number): Promise<void> {
   try {
     const owner = await sw.clients.get(value.ownerClientId)
-    if (owner?.type === 'window') owner.postMessage({ type, token: value.token, message })
+    if (owner?.type === 'window') owner.postMessage({ type, token: value.token, message, bytes })
   } catch { /* The initiating page may have closed. */ }
 }
 
@@ -324,6 +327,7 @@ async function handleDownloadRequest(event: FetchEvent, request: Request, url: U
     }
 
     let offset = 0
+    let lastProgressAt = 0
     let finished = false
     const finish = (type: string, message?: string) => {
       if (finished) return
@@ -346,6 +350,10 @@ async function handleDownloadRequest(event: FetchEvent, request: Request, url: U
           if (data.byteLength !== expected) throw new Error(`File range at byte ${offset} is incomplete.`)
           offset += data.byteLength
           controller.enqueue(new Uint8Array(data))
+          if (Date.now() - lastProgressAt >= 5_000) {
+            lastProgressAt = Date.now()
+            void notifyDownloadOwner(token, 'PEERLINK_DOWNLOAD_PROGRESS', undefined, offset)
+          }
           if (offset >= metadata.size) {
             controller.close()
             finish('PEERLINK_DOWNLOAD_FINISHED')
@@ -370,6 +378,87 @@ const downloadMatch = ({ request, url }: { request: Request; url: URL }) =>
   url.origin === sw.location.origin && DOWNLOAD_PATH.test(url.pathname) && request.method === 'GET'
 
 registerRoute(downloadMatch, ({ event, request, url }) => handleDownloadRequest(event as FetchEvent, request, url), 'GET')
+
+/** Completed local files are independent of the room and any page/peer broker. */
+async function handleLocalPreviewRequest(event: FetchEvent, request: Request, url: URL): Promise<Response> {
+  if (url.origin !== sw.location.origin) return emptyResponse(403)
+  const match = LOCAL_PREVIEW_PATH.exec(url.pathname)
+  if (!match || !['GET', 'HEAD'].includes(request.method)) return emptyResponse(405)
+  let fileId: string
+  try { fileId = decodeURIComponent(match[1]) } catch { return emptyResponse(400) }
+  if (!/^[A-Za-z0-9_-]{1,128}$/.test(fileId)) return emptyResponse(400)
+  const metadata = await getMetaData(fileId)
+  if (!metadata || !validDownloadMetadata(metadata, metadata.size)) return emptyResponse(404)
+  try { checkPreviewSize(metadata) } catch { return emptyResponse(413) }
+  const size = metadata.mimeType.startsWith('text/') ? Math.min(metadata.size, MAX_TEXT_PREVIEW_BYTES) : metadata.size
+  let start = 0
+  let end = size - 1
+  const rawRange = request.headers.get('Range')
+  if (rawRange !== null) {
+    const range = /^bytes=(\d*)-(\d*)$/i.exec(rawRange.trim())
+    if (!range || (!range[1] && !range[2])) return emptyResponse(416, `bytes */${size}`, metadata.mimeType)
+    if (!range[1]) {
+      const suffix = Number(range[2])
+      if (!Number.isSafeInteger(suffix) || suffix < 1) return emptyResponse(416, `bytes */${size}`, metadata.mimeType)
+      start = Math.max(0, size - suffix)
+    } else {
+      start = Number(range[1])
+      end = range[2] ? Number(range[2]) : size - 1
+      if (!Number.isSafeInteger(start) || !Number.isSafeInteger(end) || end < start) return emptyResponse(416, `bytes */${size}`, metadata.mimeType)
+      end = Math.min(end, size - 1)
+    }
+    if (start >= size || size === 0) return emptyResponse(416, `bytes */${size}`, metadata.mimeType)
+  }
+  const headers = previewHeaders(metadata.mimeType)
+  headers.set('Content-Length', String(Math.max(0, end - start + 1)))
+  if (rawRange !== null) headers.set('Content-Range', `bytes ${start}-${end}/${size}`)
+  const status = rawRange !== null ? 206 : 200
+  if (request.method === 'HEAD' || size === 0) return new Response(null, { status, headers })
+  let finishLifetime!: () => void
+  event.waitUntil(new Promise<void>(resolve => { finishLifetime = resolve }))
+  let finished = false
+  let cancelled = false
+  let streamController: ReadableStreamDefaultController<Uint8Array> | undefined
+  const finish = () => {
+    if (finished) return
+    finished = true
+    request.signal.removeEventListener('abort', abort)
+    finishLifetime()
+  }
+  const abort = () => {
+    if (finished) return
+    cancelled = true
+    streamController?.error(new DOMException('Preview canceled', 'AbortError'))
+    finish()
+  }
+  request.signal.addEventListener('abort', abort, { once: true })
+  let offset = start
+  const body = new ReadableStream<Uint8Array>({
+    start(controller) {
+      streamController = controller
+      if (request.signal.aborted) abort()
+    },
+    async pull(controller) {
+      try {
+        if (cancelled) throw new DOMException('Preview canceled', 'AbortError')
+        const nextEnd = Math.min(offset + MAX_RANGE_BYTES - 1, end)
+        const data = await readFileRange(fileId, metadata, offset, nextEnd)
+        if (cancelled) return
+        if (data.byteLength !== nextEnd - offset + 1) throw new Error('Local preview range is incomplete.')
+        offset += data.byteLength
+        controller.enqueue(new Uint8Array(data))
+        if (offset > end) { controller.close(); finish() }
+      } catch (error) { if (!cancelled) controller.error(error); finish() }
+    },
+    cancel() { cancelled = true; finish() }
+  })
+  return new Response(body, { status, headers })
+}
+
+for (const method of ['GET', 'HEAD'] as const) {
+  registerRoute(({ url }: { url: URL }) => url.origin === sw.location.origin && LOCAL_PREVIEW_PATH.test(url.pathname),
+    ({ event, request, url }) => handleLocalPreviewRequest(event as FetchEvent, request, url), method)
+}
 
 function askPage(
   client: WindowClient,
@@ -452,6 +541,17 @@ async function handlePreviewRequest(event: FetchEvent, request: Request, url: UR
 
     const metadata = validateBrokerReply(reply, start, end)
     if (!metadata) return emptyResponse(502)
+    checkPreviewSize(metadata)
+    if (metadata.mimeType.startsWith('text/')) {
+      const size = Math.min(metadata.size, MAX_TEXT_PREVIEW_BYTES)
+      if (request.headers.has('Range') && (!range || start >= size)) return emptyResponse(416, `bytes */${size}`, metadata.mimeType)
+      const actualEnd = Math.min(end, size - 1)
+      const headers = previewHeaders(metadata.mimeType)
+      const data = metadata.data.slice(0, Math.max(0, actualEnd - start + 1))
+      headers.set('Content-Length', String(data.byteLength))
+      if (range) headers.set('Content-Range', `bytes ${start}-${actualEnd}/${size}`)
+      return new Response(request.method === 'HEAD' ? null : data, { status: range ? 206 : 200, headers })
+    }
     if (!request.headers.has('Range')) {
       const headers = previewHeaders(metadata.mimeType)
       headers.set('Content-Length', String(metadata.size))

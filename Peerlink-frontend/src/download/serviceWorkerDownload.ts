@@ -6,14 +6,15 @@ import {
 
 const WORKER_TIMEOUT_MS = 30_000;
 const DOWNLOAD_CAPABILITY_TIMEOUT_MS = 2_500;
-const DOWNLOAD_TIMEOUT_MS = 30 * 60_000;
+// Only forward byte progress extends this watchdog, never duplicate READY/progress messages.
+const DOWNLOAD_IDLE_TIMEOUT_MS = 2 * 60_000;
 
 function tokenValue(): string {
     if (typeof crypto.randomUUID === 'function') return crypto.randomUUID();
     return `${Date.now()}-${Math.random().toString(36).slice(2)}-${Math.random().toString(36).slice(2)}`;
 }
 
-function activeWorkerSupportsDownload(worker: ServiceWorker): Promise<boolean> {
+export function activeWorkerSupportsDownload(worker: ServiceWorker, minimumVersion = 2): Promise<boolean> {
     return new Promise(resolve => {
         const channel = new MessageChannel();
         let settled = false;
@@ -29,7 +30,7 @@ function activeWorkerSupportsDownload(worker: ServiceWorker): Promise<boolean> {
         };
         timer = window.setTimeout(() => finish(false), DOWNLOAD_CAPABILITY_TIMEOUT_MS);
         channel.port1.onmessage = ({ data }) => finish(
-            data?.type === 'PEERLINK_DOWNLOAD_CAPABILITY_ACK' && Number.isSafeInteger(data.version) && data.version >= 1
+            data?.type === 'PEERLINK_DOWNLOAD_CAPABILITY_ACK' && Number.isSafeInteger(data.version) && data.version >= minimumVersion
         );
         channel.port1.onmessageerror = () => finish(false);
         channel.port1.start();
@@ -38,13 +39,13 @@ function activeWorkerSupportsDownload(worker: ServiceWorker): Promise<boolean> {
     });
 }
 
-async function requireCurrentDownloadCapability(worker: ServiceWorker, updateWaiting: boolean): Promise<void> {
-    if (updateWaiting && !(await activeWorkerSupportsDownload(worker))) {
-        throw new Error('Apply the PeerLink update, then retry the download.');
+async function requireCurrentDownloadCapability(worker: ServiceWorker, minimumVersion: number): Promise<void> {
+    if (!(await activeWorkerSupportsDownload(worker, minimumVersion))) {
+        throw new Error('Apply the PeerLink update, then retry. Use Download if a preview is unavailable.');
     }
 }
 
-async function controlledPeerLinkWorker(): Promise<ServiceWorker> {
+async function controlledPeerLinkWorker(minimumVersion = 2): Promise<ServiceWorker> {
     if (typeof navigator === 'undefined' || !('serviceWorker' in navigator) || typeof ReadableStream !== 'function') {
         throw new Error('Large downloads need streaming service-worker support in this browser.');
     }
@@ -55,8 +56,7 @@ async function controlledPeerLinkWorker(): Promise<ServiceWorker> {
     const container = navigator.serviceWorker;
     const current = container.controller;
     if (current && isPeerLinkServiceWorker(current)) {
-        const registration = await container.getRegistration().catch(() => undefined);
-        await requireCurrentDownloadCapability(current, Boolean(registration?.waiting));
+        await requireCurrentDownloadCapability(current, minimumVersion);
         return current;
     }
 
@@ -82,7 +82,7 @@ async function controlledPeerLinkWorker(): Promise<ServiceWorker> {
         container.addEventListener('controllerchange', onControllerChange);
         onControllerChange();
     });
-    await requireCurrentDownloadCapability(worker, Boolean(registration.waiting));
+    await requireCurrentDownloadCapability(worker, minimumVersion);
     return worker;
 }
 
@@ -116,8 +116,16 @@ function registerToken(worker: ServiceWorker, value: {
 }
 
 /** Ask the active same-origin service worker to stream a completed IndexedDB file as an attachment. */
-export async function downloadWithServiceWorker(fileId: string, name: string, size: number): Promise<void> {
-    const worker = await controlledPeerLinkWorker();
+export async function localPreviewUrl(fileId: string): Promise<string> {
+    try { await controlledPeerLinkWorker(2); }
+    catch (error) { throw new Error(`Preview streaming is unavailable. ${error instanceof Error ? error.message : String(error)} Download the file to open it in another app.`); }
+    return new URL(`/__peerlink_local_preview/${encodeURIComponent(fileId)}`, window.location.origin).href;
+}
+
+export async function downloadWithServiceWorker(fileId: string, name: string, size: number, storageFormat?: 'extent-v1'): Promise<void> {
+    const worker = await controlledPeerLinkWorker(storageFormat === 'extent-v1' ? 2 : 1);
+    // v1 is safe for legacy rows but cannot report progress; only v2 gets an idle watchdog.
+    const reportsProgress = await activeWorkerSupportsDownload(worker, 2);
     const token = tokenValue();
     const frame = document.createElement('iframe');
     frame.hidden = true;
@@ -130,6 +138,7 @@ export async function downloadWithServiceWorker(fileId: string, name: string, si
         const container = navigator.serviceWorker;
         await new Promise<void>((resolve, reject) => {
             let started = false;
+            let bytes = 0;
             let settled = false;
             let timer = 0;
             const cleanup = () => {
@@ -143,13 +152,20 @@ export async function downloadWithServiceWorker(fileId: string, name: string, si
                 cleanup();
                 reject(error);
             };
+            const watchActivity = () => {
+                window.clearTimeout(timer);
+                if (reportsProgress) timer = window.setTimeout(() => fail(new Error('The download stopped making progress. Check the browser downloads list and retry.')), DOWNLOAD_IDLE_TIMEOUT_MS);
+            };
             const onMessage = (event: MessageEvent) => {
+                if (event.source !== worker) return;
                 const data = event.data;
                 if (!data || data.token !== token) return;
-                if (data.type === 'PEERLINK_DOWNLOAD_READY') {
+                if (data.type === 'PEERLINK_DOWNLOAD_READY' && !started) {
                     started = true;
-                    window.clearTimeout(timer);
-                    timer = window.setTimeout(() => fail(new Error('The large-file download did not finish. Check the browser downloads list and retry.')), DOWNLOAD_TIMEOUT_MS);
+                    watchActivity();
+                } else if (data.type === 'PEERLINK_DOWNLOAD_PROGRESS' && started && Number.isSafeInteger(data.bytes) && data.bytes > bytes && data.bytes <= size) {
+                    bytes = data.bytes;
+                    watchActivity();
                 } else if (data.type === 'PEERLINK_DOWNLOAD_FINISHED') {
                     if (settled) return;
                     settled = true;
@@ -164,7 +180,7 @@ export async function downloadWithServiceWorker(fileId: string, name: string, si
             container.addEventListener('message', onMessage);
             timer = window.setTimeout(() => fail(new Error(started
                 ? 'The large-file download did not finish. Check the browser downloads list and retry.'
-                : 'The browser did not start the large-file download. Check service-worker support and retry.')), started ? DOWNLOAD_TIMEOUT_MS : WORKER_TIMEOUT_MS);
+                : 'The browser did not start the large-file download. Check service-worker support and retry.')), WORKER_TIMEOUT_MS);
             frame.src = new URL(`/__peerlink_download/${encodeURIComponent(token)}`, window.location.origin).href;
         });
     } catch (error) {

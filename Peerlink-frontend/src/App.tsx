@@ -1,3 +1,4 @@
+import { checkPreviewSize, MAX_TEXT_PREVIEW_BYTES, safePreviewMime } from './previewPolicy';
 import { useEffect, useRef, useState } from "react";
 import { useP2P } from "./hooks/useP2P";
 import {
@@ -265,6 +266,7 @@ function App() {
     setPreviewUrl(null);
     setPreviewError(null);
     try {
+      checkPreviewSize(file);
       const url = await openPreview(file);
       if (request !== previewRequest.current) { void releasePreviewUrl(url); return; }
       setPreviewUrl(url);
@@ -278,8 +280,12 @@ function App() {
     setPreviewError(null);
     const { file, id } = queuedFile;
     const mimeType = getFileMimeType(file);
-    const previewBlob = mimeType === file.type ? file : file.slice(0, file.size, mimeType);
-    const url = URL.createObjectURL(previewBlob);
+    let url: string | null = null;
+    try {
+      checkPreviewSize({ size: file.size, mimeType });
+      const end = mimeType.startsWith('text/') ? Math.min(file.size, MAX_TEXT_PREVIEW_BYTES) : file.size;
+      url = URL.createObjectURL(file.slice(0, end, safePreviewMime(mimeType)));
+    } catch (error) { setPreviewError(error instanceof Error ? error.message : String(error)); }
     setPreviewFile({
       fileId: `q-${id}`,
       roomId,

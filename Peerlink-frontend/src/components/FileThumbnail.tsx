@@ -41,6 +41,7 @@ function canvasBlob(canvas: HTMLCanvasElement): Promise<Blob | null> {
 }
 
 async function makeBoundedImageUrl(file: File): Promise<string | null> {
+    if (file.size > MAX_IMAGE_FALLBACK_BYTES) return null;
     if (typeof createImageBitmap !== "function") {
         return file.size <= MAX_IMAGE_FALLBACK_BYTES ? URL.createObjectURL(file) : null;
     }

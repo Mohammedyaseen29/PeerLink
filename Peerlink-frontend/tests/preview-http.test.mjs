@@ -5,15 +5,16 @@ import vm from 'node:vm';
 import ts from 'typescript';
 import { webcrypto } from 'node:crypto';
 
-const source = (await readFile(new URL('../src/sw.ts', import.meta.url), 'utf8')).replace(/^import .*\r?\n/gm, '').replaceAll('import.meta.env.DEV', 'false');
+const policySource = (await readFile(new URL('../src/previewPolicy.ts', import.meta.url), 'utf8')).replaceAll('export ', '');
+const source = policySource + '\n' + (await readFile(new URL('../src/sw.ts', import.meta.url), 'utf8')).replace(/^import .*\r?\n/gm, '').replaceAll('import.meta.env.DEV', 'false');
 const compiled = ts.transpileModule(source, { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ESNext } }).outputText.replace(/export \{\};?/, '');
 
-function fixture(size = 2 * 1024 * 1024 + 73) {
+function fixture(size = 2 * 1024 * 1024 + 73, mimeType = 'image/webp') {
     const bytes = Uint8Array.from({ length: size }, (_, i) => i * 31 % 256), ranges = [], lifetimes = [];
     const client = { type: 'window', postMessage(message, ports) {
         const { start, end } = message;
         ranges.push({ start, end });
-        ports[0].postMessage({ size, mimeType: 'image/webp', data: bytes.slice(start, Math.min(end + 1, size)).buffer });
+        ports[0].postMessage({ size, mimeType, data: bytes.slice(start, Math.min(end + 1, size)).buffer });
         ports[0].close();
     } };
     const noop = () => {};
@@ -65,4 +66,15 @@ test('canceling a full preview releases its service-worker lifetime', async () =
     await response.body.cancel();
     await Promise.all(f.lifetimes);
     assert.ok(f.ranges.length <= 2);
+});
+
+test('remote text previews return only a plain-text 256KiB prefix', async () => {
+    const f = fixture(2 * 1024 * 1024 + 73, 'text/html');
+    const response = await f.request();
+    assert.equal(response.status, 200);
+    assert.equal(response.headers.get('Content-Type'), 'text/plain; charset=utf-8');
+    assert.match(response.headers.get('Content-Security-Policy'), /sandbox/);
+    assert.deepEqual(new Uint8Array(await response.arrayBuffer()), f.bytes.slice(0, 256 * 1024));
+    assert.equal(f.ranges.length, 1);
+    assert.equal((await f.request({ Range: 'bytes=262144-' })).status, 416);
 });

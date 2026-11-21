@@ -1,6 +1,7 @@
 import { CircleAlert, LoaderCircle, RefreshCw, X } from "lucide-react";
 import type { FileMetadata } from "../ProgressDB";
 import { formatBytes } from "../utils/helpers";
+import { MAX_TEXT_PREVIEW_BYTES } from "../previewPolicy";
 
 interface FilePreviewModalProps {
     file: FileMetadata;
@@ -28,7 +29,7 @@ export function FilePreviewModal({
                 <div className="modal-header">
                     <div className="modal-title-group">
                         <h3 className="modal-title">{file.name}</h3>
-                        <p className="modal-subtitle">{formatBytes(file.size)}</p>
+                        <p className="modal-subtitle">{formatBytes(file.size)}{file.mimeType.startsWith('text/') && file.size > MAX_TEXT_PREVIEW_BYTES ? ' · Preview shows the first 256 KiB' : ''}</p>
                     </div>
                     <button onClick={onClose} className="btn-icon btn-close" aria-label="Close preview">
                         <X size={24} />

@@ -112,7 +112,8 @@ export class TransferEngine {
             const estimate = await navigator.storage?.estimate?.();
             if (typeof estimate?.quota === 'number' && Number.isFinite(estimate.quota) &&
                 typeof estimate.usage === 'number' && Number.isFinite(estimate.usage) &&
-                estimate.quota - estimate.usage < meta.size) {
+                estimate.quota - estimate.usage < meta.size + (meta.size > 32 * 1024 * 1024
+                    ? 32 * 1024 * 1024 + Math.ceil(meta.size * 0.01) : 0)) {
                 throw new Error(`Not enough receiver storage is available for "${meta.name}". Free space and retry.`);
             }
         } catch (error) {
@@ -186,6 +187,7 @@ export class TransferEngine {
             const localId = crypto.randomUUID();
             const meta: FileMetadata = { fileId: localId, sourcePeerId: this.source.peerId, sourceFileId: fileId, sourceName: this.source.peerName,
                 sharedWithRoom: msg.sharedWithRoom === true, name, size: Number(size), totalChunks: Number(totalChunks), chunkSize: Number(chunkSize),
+                ...(Number(size) > 32 * 1024 * 1024 ? { storageFormat: 'extent-v1' as const } : {}),
                 roomId: this.room(), roomType: this.roomType(), path: path || undefined,
                 mimeType: typeof msg.mimeType === 'string' ? msg.mimeType : '', receivedChunks: 0, status: 'receiving', createdAt: Date.now() };
             const incoming: Incoming = { meta, wireId: fileId, next: 0, committed: 0, queue: [], writing: false, committing: false,
