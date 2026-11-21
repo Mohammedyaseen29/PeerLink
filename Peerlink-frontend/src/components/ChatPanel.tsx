@@ -1,4 +1,4 @@
-import { Fragment, useEffect, useId, useLayoutEffect, useRef, useState } from "react";
+import { Fragment, useCallback, useEffect, useId, useLayoutEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { ArrowDown, ArrowUp, Check, CheckCheck, MessageCircle, X } from "lucide-react";
 import type { ChatMessage, PeerMember } from "../types";
@@ -60,6 +60,7 @@ export function ChatPanel({
     const [present, setPresent] = useState(isOpen);
     const [inputValue, setInputValue] = useState("");
     const [showLatest, setShowLatest] = useState(false);
+    const layerRef = useRef<HTMLDivElement>(null);
     const panelRef = useRef<HTMLElement>(null);
     const textareaRef = useRef<HTMLTextAreaElement>(null);
     const viewportRef = useRef<HTMLDivElement>(null);
@@ -72,6 +73,49 @@ export function ChatPanel({
     const titleId = useId();
     const hintId = useId();
     closeHandler.current = onClose;
+
+    const resizeComposer = useCallback(() => {
+        const input = textareaRef.current;
+        if (!input) return;
+        const maxHeight = Number.parseFloat(window.getComputedStyle(input).maxHeight) || 144;
+        input.style.height = "0px";
+        const contentHeight = input.scrollHeight;
+        input.style.height = `${Math.min(contentHeight, maxHeight)}px`;
+        input.style.overflowY = contentHeight > maxHeight ? "auto" : "hidden";
+        if (nearBottom.current && viewportRef.current) viewportRef.current.scrollTop = viewportRef.current.scrollHeight;
+    }, []);
+
+    useLayoutEffect(() => {
+        const layer = layerRef.current;
+        if (!isOpen || !layer) return;
+        const visualViewport = window.visualViewport;
+        let frame = 0;
+        const updateViewport = () => {
+            frame = 0;
+            // Mobile keyboards resize/pan the visual viewport without resizing
+            // the layout viewport used by fixed elements and viewport units.
+            const height = visualViewport?.height ?? window.innerHeight;
+            layer.style.setProperty("--chat-viewport-height", `${height}px`);
+            layer.style.setProperty("--chat-viewport-width", `${visualViewport?.width ?? window.innerWidth}px`);
+            layer.style.setProperty("--chat-viewport-top", `${visualViewport?.offsetTop ?? 0}px`);
+            layer.style.setProperty("--chat-viewport-left", `${visualViewport?.offsetLeft ?? 0}px`);
+            layer.dataset.compact = String(height < 500);
+            resizeComposer();
+        };
+        const scheduleViewport = () => {
+            if (!frame) frame = window.requestAnimationFrame(updateViewport);
+        };
+        updateViewport();
+        visualViewport?.addEventListener("resize", scheduleViewport);
+        visualViewport?.addEventListener("scroll", scheduleViewport);
+        window.addEventListener("resize", scheduleViewport);
+        return () => {
+            window.cancelAnimationFrame(frame);
+            visualViewport?.removeEventListener("resize", scheduleViewport);
+            visualViewport?.removeEventListener("scroll", scheduleViewport);
+            window.removeEventListener("resize", scheduleViewport);
+        };
+    }, [isOpen, resizeComposer]);
 
     useEffect(() => {
         if (isOpen) {
@@ -146,20 +190,14 @@ export function ChatPanel({
         } else if (appended) setShowLatest(true);
     }, [isOpen, messages, selfPeerId]);
 
-    useLayoutEffect(() => {
-        const input = textareaRef.current;
-        if (!input) return;
-        input.style.height = "0px";
-        input.style.height = `${Math.min(input.scrollHeight, 144)}px`;
-        input.style.overflowY = input.scrollHeight > 144 ? "auto" : "hidden";
-    }, [inputValue, isOpen]);
+    useLayoutEffect(resizeComposer, [inputValue, isOpen, resizeComposer]);
 
     const send = () => {
         if (!connected || !inputValue.trim() || composing.current) return;
         onSendMessage(inputValue.trim());
         setInputValue("");
         nearBottom.current = true;
-        textareaRef.current?.focus();
+        textareaRef.current?.focus({ preventScroll: true });
     };
 
     const jumpToLatest = () => {
@@ -174,7 +212,7 @@ export function ChatPanel({
     if (!present && !isOpen) return null;
 
     return createPortal(
-        <div className="room-chat-layer" data-state={isOpen ? "open" : "closed"}>
+        <div ref={layerRef} className="room-chat-layer" data-state={isOpen ? "open" : "closed"}>
             <div className="room-chat-backdrop" aria-hidden="true" onClick={() => closeHandler.current()} />
             <section ref={panelRef} className="room-chat-dialog" role="dialog" aria-modal="true" aria-labelledby={titleId} aria-hidden={!isOpen || undefined} inert={!isOpen} tabIndex={-1}>
                 <header className="room-chat-header">
@@ -257,8 +295,10 @@ export function ChatPanel({
                                 event.preventDefault();
                                 send();
                             }
-                        }} aria-label="Message your peer" aria-describedby={hintId} placeholder={connected ? "Write a message…" : roomId ? "Waiting for your peer…" : "Connect to a room to chat…"} rows={1} maxLength={500} disabled={!connected} />
-                        <button type="submit" className="room-chat-send" disabled={!connected || !inputValue.trim()} aria-label="Send message"><ArrowUp size={20} strokeWidth={2.2} /></button>
+                        }} aria-label="Message your peer" aria-describedby={hintId} placeholder={connected ? "Write a message…" : roomId ? "Waiting for your peer…" : "Connect to a room to chat…"} rows={1} maxLength={500} disabled={!connected} enterKeyHint="send" />
+                        <button type="submit" className="room-chat-send" disabled={!connected || !inputValue.trim()} aria-label="Send message" onPointerDown={event => {
+                            if (event.isPrimary && document.activeElement === textareaRef.current) event.preventDefault();
+                        }}><ArrowUp size={20} strokeWidth={2.2} /></button>
                     </form>
                     <div className="room-chat-composer-meta">
                         <span className="room-chat-you"><Avatar avatarId={avatar} size="xs" /><span>You</span></span>
