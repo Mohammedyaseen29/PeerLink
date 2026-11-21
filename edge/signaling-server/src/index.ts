@@ -187,18 +187,27 @@ export class SignalingRoom extends DurableObject {
       ? Array.from(new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(`${roomId}:${resumeToken}`))))
         .map(value => value.toString(16).padStart(2, "0")).join("")
       : crypto.randomUUID();
+    if (this.pruneSuspended()) void this.persistSuspended();
     const activeSocket = this.ctx.getWebSockets().find(client => {
+      if (client.readyState !== 1) return false;
       const session = this.getSession(client);
       return client !== ws && session && "protocolVersion" in session && session.roomId === roomId && session.peerId === peerId;
     });
     const activeSession = activeSocket ? this.getSession(activeSocket) : undefined;
     const previous = activeSession && "protocolVersion" in activeSession ? activeSession : this.suspended.get(peerId)?.session;
-    const existingPeers = this.getRoomPeers(roomId, peerId);
-    if (existingPeers.length >= MAX_ROOM_SESSIONS) {
+    // Resume records preserve an interrupted connection's identity; only live
+    // sockets occupy seats. A lost leave frame must not lock the room for five minutes.
+    const activePeers = this.getRoomPeers(roomId, peerId, false);
+    if (activePeers.length >= MAX_ROOM_SESSIONS) {
       this.send(ws, { type: "room_full", roomId, maxPeers: MAX_ROOM_SESSIONS });
       if (ws.readyState === 1) ws.close(4001, "Room full");
       return;
     }
+
+    // A fresh join claims the vacant seat and retires abandoned identities.
+    // A same-session reconnect retains the roster and its existing RTC link.
+    if (!previous) this.releaseSuspendedRoomPeers(roomId, ws);
+    const existingPeers = this.getRoomPeers(roomId, peerId);
 
     const roomType = existingPeers[0]
       ? this.getSessionByPeerId(existingPeers[0].peerId)?.roomType ?? "persistent"
@@ -272,6 +281,7 @@ export class SignalingRoom extends DurableObject {
       if (ws.readyState === 1) ws.close(4001, "Room full");
       return;
     }
+    this.releaseSuspendedRoomPeers(roomId, ws);
 
     const firstPeer = this.ctx.getWebSockets().find((client) => {
       if (client === ws || client.readyState !== 1) return false;
@@ -424,8 +434,26 @@ export class SignalingRoom extends DurableObject {
     } else this.broadcastSessionLeft(session, ws);
   }
 
+  private pruneSuspended() {
+    let changed = false;
+    for (const [peerId, record] of this.suspended) if (record.expiresAt <= Date.now()) {
+      this.suspended.delete(peerId);
+      changed = true;
+    }
+    return changed;
+  }
+
+  private releaseSuspendedRoomPeers(roomId: string, exceptWs: WebSocket) {
+    for (const [peerId, record] of this.suspended) {
+      if (record.session.roomId !== roomId) continue;
+      this.suspended.delete(peerId);
+      this.broadcastToRoom(roomId, { type: "peer_left", roomId, peerId }, exceptWs);
+    }
+    void this.persistSuspended();
+  }
+
   private persistSuspended() {
-    for (const [peerId, record] of this.suspended) if (record.expiresAt <= Date.now()) this.suspended.delete(peerId);
+    this.pruneSuspended();
     return this.ctx.storage.put(SUSPENDED_KEY, [...this.suspended.values()]);
   }
 
@@ -476,6 +504,7 @@ export class SignalingRoom extends DurableObject {
 
   private getSessionByPeerId(peerId: string) {
     for (const client of this.ctx.getWebSockets()) {
+      if (client.readyState !== 1) continue;
       const session = this.getSession(client);
       if (session && "protocolVersion" in session && session.peerId === peerId) return session;
     }
@@ -492,12 +521,13 @@ export class SignalingRoom extends DurableObject {
     };
   }
 
-  private getRoomPeers(roomId: string, exceptPeerId?: string): RoomPeer[] {
+  private getRoomPeers(roomId: string, exceptPeerId?: string, includeSuspended = true): RoomPeer[] {
     const peers = this.ctx.getWebSockets()
       .filter((client) => client.readyState === 1)
       .map((client) => this.getSession(client))
       .filter((session): session is RoomSession => Boolean(session && "protocolVersion" in session && session.roomId === roomId && session.peerId !== exceptPeerId))
       .map((session) => this.publicPeer(session));
+    if (!includeSuspended) return peers;
     const present = new Set(peers.map(peer => peer.peerId));
     for (const record of this.suspended.values()) {
       if (record.expiresAt > Date.now() && record.session.roomId === roomId && record.session.peerId !== exceptPeerId && !present.has(record.session.peerId)) {
@@ -508,7 +538,7 @@ export class SignalingRoom extends DurableObject {
   }
 
   private countRoomSessions(roomId: string) {
-    return this.getRoomPeers(roomId).length;
+    return this.getRoomPeers(roomId, undefined, false).length;
   }
 
   private countLegacyRoomSessions(roomId: string, exceptWs?: WebSocket) {
