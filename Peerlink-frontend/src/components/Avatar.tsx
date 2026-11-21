@@ -16,12 +16,12 @@ export function Avatar({ avatarId, size = "md", className = "" }: AvatarProps) {
         <div
             className={`avatar-blob ${sizeClass} ${className}`}
             style={{
-                backgroundColor: avatar.bgColor,
-                color: avatar.color,
+                backgroundColor: `color-mix(in srgb, ${avatar.color} 12%, white)`,
+                color: `color-mix(in srgb, ${avatar.color} 35%, #1b2638)`,
             }}
             title={avatar.name}
         >
-            {avatar.emoji}
+            <span aria-hidden="true">{avatar.name.slice(0, 1)}</span>
         </div>
     );
 }

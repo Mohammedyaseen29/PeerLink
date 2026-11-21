@@ -14,6 +14,7 @@ import {
 } from "lucide-react";
 import type { FileMetadata } from "../ProgressDB";
 import { formatBytes, isPreviewable, getFileIconType } from "../utils/helpers";
+import "./transfer-workspace.css";
 
 interface ReceivedFilesProps {
     files: FileMetadata[];

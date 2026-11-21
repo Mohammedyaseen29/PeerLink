@@ -1,5 +1,7 @@
-import { Link2, MessageCircle, Settings } from "lucide-react";
+import { Settings } from "lucide-react";
+import { ChatToggleButton } from "./ChatPanel";
 import { Avatar } from "./Avatar";
+import { BrandMark } from "./BrandMark";
 
 interface HeaderProps {
     onSettingsClick: () => void;
@@ -8,55 +10,31 @@ interface HeaderProps {
     connected: boolean;
     username: string;
     avatar: string;
+    isChatOpen?: boolean;
 }
 
-export function Header({ 
-    onSettingsClick, 
-    onChatClick, 
-    unreadCount, 
-    connected,
-    username,
-    avatar,
-}: HeaderProps) {
+export function Header({ onSettingsClick, onChatClick, unreadCount, connected, username, avatar, isChatOpen }: HeaderProps) {
     return (
-        <header className="header room-workspace-header">
-            <div className="header-content room-workspace-header-content">
-                <div className="logo room-workspace-brand">
-                    <div className="logo-icon room-workspace-mark" aria-hidden="true">
-                        <Link2 size={20} strokeWidth={2.5} />
-                    </div>
-                    <h1 className="logo-text room-workspace-wordmark">PeerLink</h1>
+        <header className="app-header">
+            <a className="logo" href="/" aria-label="PeerLink home">
+                <BrandMark className="logo-symbol" />
+                <span className="brand-wordmark">PeerLink<span className="wordmark-period">.</span></span>
+            </a>
+            <nav className="header-nav" aria-label="Workspace">
+                <a href="#transfer-workspace" className="nav-link active" aria-current="page">Transfer</a>
+                <ChatToggleButton unreadCount={unreadCount} onClick={onChatClick} isOpen={isChatOpen} />
+            </nav>
+            <div className="header-account">
+                <span className={`header-connection ${connected ? "is-connected" : ""}`}>
+                    <span aria-hidden="true" />{connected ? "Peer connected" : "Your space"}
+                </span>
+                <div className="user-info">
+                    <Avatar avatarId={avatar} size="sm" />
+                    <span className="username">{username}</span>
                 </div>
-                
-                <div className="header-actions room-workspace-header-actions">
-                    {connected && (
-                        <button
-                            type="button"
-                            className="chat-toggle-btn room-workspace-chat-btn"
-                            onClick={onChatClick}
-                            aria-label={unreadCount > 0 ? `Open chat, ${unreadCount} unread messages` : "Open chat"}
-                            title="Chat"
-                        >
-                            <MessageCircle size={20} aria-hidden="true" />
-                            {unreadCount > 0 && <span className="chat-unread-badge">{unreadCount > 9 ? "9+" : unreadCount}</span>}
-                        </button>
-                    )}
-                    
-                    <div className="user-info room-workspace-identity">
-                        <Avatar avatarId={avatar} size="sm" className="room-workspace-avatar" />
-                        <span className="username">{username}</span>
-                    </div>
-                    
-                    <button
-                        onClick={onSettingsClick}
-                        type="button"
-                        className="header-settings-btn room-workspace-settings-btn"
-                        aria-label="Open settings"
-                        title="Settings"
-                    >
-                        <Settings size={22} />
-                    </button>
-                </div>
+                <button onClick={onSettingsClick} className="header-settings-btn" title="Settings" aria-label="Open settings">
+                    <Settings size={18} />
+                </button>
             </div>
         </header>
     );

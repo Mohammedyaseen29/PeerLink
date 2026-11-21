@@ -3,6 +3,7 @@ import { Clock, Eye, Pause, Play, RefreshCw, X } from "lucide-react";
 import type { QueuedFile } from "../types";
 import { formatBytes, formatTime, getFileMimeType, isPreviewable } from "../utils/helpers";
 import { FileThumbnail } from "./FileThumbnail";
+import "./transfer-workspace.css";
 
 interface SendQueueProps {
     queue: QueuedFile[];

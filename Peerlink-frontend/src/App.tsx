@@ -16,9 +16,9 @@ import { releasePreviewUrl, type FileMetadata } from "./ProgressDB";
 import { getFileMimeType } from "./utils/helpers";
 import type { QueuedFile, RoomType, SignalingStatus } from "./types";
 import { registerPeerLinkServiceWorker } from "./serviceWorker";
-import { CircleAlert, CircleCheck, Copy, Download, Info, LoaderCircle, RefreshCw, Upload, UserPlus, WifiOff, X } from "lucide-react";
+import { CircleAlert, CircleCheck, Copy, FolderOpen, Info, LoaderCircle, MessageCircle, RefreshCw, ShieldCheck, UserPlus, WifiOff, X } from "lucide-react";
 import { parseRoomInvite } from "./utils/roomInvite";
-import "./workspace.css";
+import { BrandMark } from "./components/BrandMark";
 
 function getRoomStatusCopy(status: SignalingStatus, roomType: RoomType, canRetryPeer: boolean) {
   switch (status) {
@@ -310,168 +310,115 @@ function App() {
 
   return (
     <div className="app-container peerlink-app">
-      <div className="main-content">
-        <Header 
-          onSettingsClick={() => setIsSettingsOpen(true)}
-          onChatClick={() => setIsChatOpen(true)}
-          unreadCount={unreadCount}
-          connected={connected}
-          username={username}
-          avatar={settings.avatar}
-        />
-
-        <main className="workspace-main">
-          {appUpdateReady && (
-            <div className="room-status app-update-banner" role="status" aria-live="polite">
-              <div className="room-status-icon"><RefreshCw size={20} /></div>
-              <div className="room-status-copy">
-                <strong>PeerLink update ready</strong>
-                <span>{inRoom ? "Leave the room after transfers finish to install the update." : "Install the latest version to keep room members on the same app version."}</span>
-              </div>
-              <button type="button" className="room-status-retry" disabled={inRoom} onClick={() => {
-                if (inRoom) return;
-                const waitingWorker = serviceWorkerRegistration.current?.waiting;
-                if (waitingWorker) {
-                  reloadAfterControlChange.current = true;
-                  waitingWorker.postMessage({ type: 'SKIP_WAITING' });
-                } else {
-                  window.location.reload();
-                }
-              }}>
-                {inRoom ? 'Leave room to update' : 'Update now'}
-              </button>
-              <button type="button" className="toast-dismiss" onClick={() => setAppUpdateReady(false)} aria-label="Dismiss update notice"><X size={16} /></button>
+      <div className="ambient-light" aria-hidden="true" />
+      <Header
+        onSettingsClick={() => setIsSettingsOpen(true)}
+        onChatClick={() => setIsChatOpen(true)}
+        unreadCount={unreadCount}
+        connected={connected}
+        username={username}
+        avatar={settings.avatar}
+        isChatOpen={isChatOpen}
+      />
+      <main className="main-content" id="transfer-workspace">
+        {appUpdateReady && (
+          <div className="room-status app-update-banner" role="status" aria-live="polite">
+            <div className="room-status-icon"><RefreshCw size={20} /></div>
+            <div className="room-status-copy">
+              <strong>PeerLink update ready</strong>
+              <span>{inRoom ? "Leave the room after transfers finish to install the update." : "Install the latest version to keep both devices on the same app version."}</span>
             </div>
-          )}
-
-          <RoomConnection
-            key={connectionFormKey}
-            roomId={roomId}
-            onRoomIdChange={setRoomId}
-            onJoin={join}
-            onLeave={() => { setManualDiagnostics(null); handleClosePreview(); leaveRoom(); }}
-            connected={connected}
-            inRoom={inRoom}
-            connectionType={connectionType}
-            signalingStatus={signalingStatus}
-            roomType={roomType}
-            generateRoomId={generateRoomId}
-            avatar={settings.avatar}
-          />
-
-          {inRoom && (
-            <>
-              {(!connected || showRoomMembers) && (
-                <div className={`workspace-room-state${!connected && showRoomMembers ? " workspace-room-state-split" : ""}`}>
-                  {!connected && (
-                    <section className={`room-status workspace-room-status ${connectionProblem ? "room-status-offline" : unsupportedBrowser ? "room-status-local" : ""}`} aria-label="Connection status">
-                      <div className="room-status-icon" aria-hidden="true">
-                        <RoomStatusIcon size={19} className={RoomStatusIcon === LoaderCircle ? "room-status-spinner" : undefined} />
-                      </div>
-                      <div className="room-status-copy" role="status" aria-live="polite">
-                        <strong>{roomStatusTitle}</strong>
-                        <span>{roomStatusMessage}</span>
-                      </div>
-                      {canCopyConnectionDetails && (
-                        <div className="workspace-status-actions">
-                          {signalingStatus === "offline" && <button type="button" className="room-status-retry" onClick={retryConnection}><RefreshCw size={15} aria-hidden="true" /> Retry</button>}
-                          <button type="button" className="room-status-retry diagnostics-copy" onClick={() => void handleCopyDiagnostics()} disabled={copyingDiagnostics}>
-                            <Copy size={15} aria-hidden="true" /> {copyingDiagnostics ? "Copying…" : "Copy connection details"}
-                          </button>
-                        </div>
-                      )}
-                    </section>
-                  )}
-                  {showRoomMembers && (
-                    <GroupMembers
-                      members={members}
-                      username={username}
-                      avatar={settings.avatar}
-                      selfOnline={signalingStatus !== "offline"}
-                      onRetryPeer={retryPeerConnection}
-                    />
-                  )}
-                </div>
-              )}
-
-              {manualDiagnostics && (
-                <section className="connection-details-fallback" aria-label="Manual connection details copy">
-                  <label htmlFor="connection-details-text">Connection details — select and copy</label>
-                  <textarea id="connection-details-text" readOnly value={manualDiagnostics} rows={6} onFocus={(event) => event.currentTarget.select()} />
-                  <button type="button" className="btn btn-secondary btn-sm" onClick={() => setManualDiagnostics(null)}>Dismiss details</button>
-                </section>
-              )}
-
-              <div className={`transfer-workspace${showTransferControls ? "" : " transfer-workspace-single"}`}>
-                {showTransferControls && (
-                  <section className="transfer-column transfer-column-send" aria-labelledby="send-files-heading">
-                    <h2 className="workspace-section-heading" id="send-files-heading"><Upload size={18} aria-hidden="true" /> Send files</h2>
-                    <FileUploader onFilesSelect={handleFilesSelect} canSend={connected} />
-                    <SendQueue
-                      queue={sendQueue}
-                      onPause={pauseSending}
-                      onResume={resumeSending}
-                      onRetry={retrySending}
-                      onRemove={removeFromQueue}
-                      onClearAll={clearAllQueue}
-                      onPreview={handleQueuedPreview}
-                    />
-                  </section>
-                )}
-                <section className="transfer-column transfer-column-receive" aria-labelledby="received-files-heading">
-                  <h2 className="workspace-section-heading" id="received-files-heading"><Download size={18} aria-hidden="true" /> Received files</h2>
-                  {showTransferControls && currentReceivings.length > 0 && <ReceiveProgress receivings={currentReceivings} />}
-                  <ReceivedFiles
-                    files={receivedFiles}
-                    onlineFiles={onlineFiles}
-                    onDownload={downloadFile}
-                    onPreview={handlePreview}
-                    onDelete={deleteReceivedFile}
-                    onClearRoom={clearRoom}
-                  />
-                </section>
-              </div>
-            </>
-          )}
-        </main>
-
-        {toast && (
-          <div className="toast-overlay">
-            <div className={`toast-body toast-${toast.kind}`} role={toast.kind === "error" ? "alert" : "status"}>
-              <span className="toast-icon">{toast.kind === "success" ? <CircleCheck size={20} /> : toast.kind === "info" ? <Info size={20} /> : <CircleAlert size={20} />}</span>
-              <span className="toast-message-text">{toast.message}</span>
-              <button type="button" className="toast-dismiss" onClick={dismissToast} aria-label="Dismiss notification"><X size={16} /></button>
-            </div>
+            <button type="button" className="room-status-retry" disabled={inRoom} onClick={() => {
+              if (inRoom) return;
+              const waitingWorker = serviceWorkerRegistration.current?.waiting;
+              if (waitingWorker) {
+                reloadAfterControlChange.current = true;
+                waitingWorker.postMessage({ type: 'SKIP_WAITING' });
+              } else window.location.reload();
+            }}>{inRoom ? "Leave room to update" : "Update now"}</button>
+            <button type="button" className="toast-dismiss" onClick={() => setAppUpdateReady(false)} aria-label="Dismiss update notice"><X size={16} /></button>
           </div>
         )}
-
-        {previewFile && (
-          <FilePreviewModal
-            file={previewFile}
-            previewUrl={previewUrl}
-            onClose={handleClosePreview}
-          />
+        <header className="page-heading">
+          <div className="headline-group">
+            <div className="headline-kicker"><span className="kicker-line" />A DIRECT CONNECTION. A SHARED SPACE.</div>
+            <h1>Make the <span>handoff.</span></h1>
+          </div>
+          <p className="intro-description">Files, folders, and a conversation.<br /> From your device, straight to theirs.</p>
+        </header>
+        <div className="handoff-grid">
+          <div className="room-column">
+            <RoomConnection
+              key={connectionFormKey}
+              roomId={roomId}
+              onRoomIdChange={setRoomId}
+              onJoin={join}
+              onLeave={() => { setManualDiagnostics(null); handleClosePreview(); leaveRoom(); }}
+              onReconnect={signalingStatus === "offline" ? retryConnection : canRetryPeer ? () => {
+                for (const member of members) {
+                  if (member.status === "disconnected" && member.supportsReconnect) retryPeerConnection(member.peerId);
+                }
+              } : undefined}
+              connected={connected}
+              inRoom={inRoom}
+              connectionType={connectionType}
+              signalingStatus={signalingStatus}
+              roomType={roomType}
+              generateRoomId={generateRoomId}
+              avatar={settings.avatar}
+            />
+          </div>
+          <div className="send-column">
+            {showTransferControls ? <FileUploader onFilesSelect={handleFilesSelect} canSend={connected} /> : (
+              <section className="unavailable-transfer glass-card"><WifiOff size={28} /><h2>{unsupportedBrowser ? "A different browser, same files." : "This room is full."}</h2><p>{unsupportedBrowser ? "Open PeerLink in a WebRTC-capable browser to share. Your saved files remain available below." : "Each room connects two devices. Leave this room to create another."}</p></section>
+            )}
+          </div>
+        </div>
+        {inRoom && (!connected || signalingStatus === "offline") && (
+          <section className={"room-status workspace-room-status " + (connectionProblem ? "room-status-offline" : unsupportedBrowser ? "room-status-local" : "")} aria-label="Connection status">
+            <div className="room-status-icon" aria-hidden="true"><RoomStatusIcon size={19} className={RoomStatusIcon === LoaderCircle ? "room-status-spinner" : undefined} /></div>
+            <div className="room-status-copy" role="status" aria-live="polite">
+              <strong>{connected && signalingStatus === "offline" ? "Reconnecting the room service" : roomStatusTitle}</strong>
+              <span>{connected && signalingStatus === "offline" ? "Your direct file connection stays active while the room reconnects." : roomStatusMessage}</span>
+            </div>
+            {canCopyConnectionDetails && <div className="workspace-status-actions">
+              {signalingStatus === "offline" && <button type="button" className="room-status-retry" onClick={retryConnection}><RefreshCw size={15} />Retry</button>}
+              <button type="button" className="room-status-retry diagnostics-copy" onClick={() => void handleCopyDiagnostics()} disabled={copyingDiagnostics}><Copy size={15} />{copyingDiagnostics ? "Copying…" : "Connection details"}</button>
+            </div>}
+          </section>
         )}
-
-        <ChatPanel
-          isOpen={isChatOpen}
-          onClose={() => setIsChatOpen(false)}
-          messages={chatMessages}
-          selfPeerId={selfPeerId}
-          username={username}
-          avatar={settings.avatar}
-          onSendMessage={sendChatMessage}
-        />
-
-        <SettingsModal
-          isOpen={isSettingsOpen}
-          onClose={() => setIsSettingsOpen(false)}
-          settings={settings}
-          username={username}
-          avatar={settings.avatar}
-          onUpdateSettings={updateSettings}
-        />
-      </div>
+        {showRoomMembers && <GroupMembers members={members} username={username} avatar={settings.avatar} selfOnline={signalingStatus !== "offline"} onRetryPeer={retryPeerConnection} />}
+        {manualDiagnostics && <section className="connection-details-fallback glass-card" aria-label="Manual connection details copy">
+          <label htmlFor="connection-details-text">Connection details — select and copy</label>
+          <textarea id="connection-details-text" readOnly value={manualDiagnostics} rows={6} onFocus={event => event.currentTarget.select()} />
+          <button type="button" className="btn btn-secondary btn-sm" onClick={() => setManualDiagnostics(null)}>Dismiss details</button>
+        </section>}
+        <section className="activity-section" aria-labelledby="activity-title">
+          <div className="activity-heading">
+            <div><span className="eyebrow">THE SHARED SPACE</span><h2 id="activity-title">In the room.</h2></div>
+            <button type="button" className="activity-chat-link" onClick={() => setIsChatOpen(true)}><MessageCircle size={16} /><span>Room chat</span>{unreadCount > 0 && <span className="activity-unread">{unreadCount}</span>}</button>
+          </div>
+          <div className="transfer-workspace">
+            <div className="outgoing-column">
+              {sendQueue.length ? <SendQueue queue={sendQueue} onPause={pauseSending} onResume={resumeSending} onRetry={retrySending} onRemove={removeFromQueue} onClearAll={clearAllQueue} onPreview={handleQueuedPreview} /> : (
+                <div className="handoff-guide"><div className="guide-symbol"><BrandMark /></div><h3>A room. Two devices.<br />Everything between you.</h3><p>Create a temporary room for a quick exchange, or a persistent room to keep your received files on this device.</p><div className="guide-features"><span><FolderOpen size={14} />Full folders welcome</span><span><MessageCircle size={14} />Chat as you share</span></div></div>
+              )}
+            </div>
+            <div className="incoming-column">
+              {showTransferControls && currentReceivings.length > 0 && <ReceiveProgress receivings={currentReceivings} />}
+              <ReceivedFiles files={receivedFiles} onlineFiles={onlineFiles} onDownload={downloadFile} onPreview={handlePreview} onDelete={deleteReceivedFile} onClearRoom={clearRoom} />
+            </div>
+          </div>
+        </section>
+        <footer className="workspace-footer"><span><ShieldCheck size={14} />Encrypted in transit. No account needed.</span><span>Keep both devices open. We’ll handle the handoff.</span></footer>
+      </main>
+      {toast && <div className="toast-overlay"><div className={"toast-body toast-" + toast.kind} role={toast.kind === "error" ? "alert" : "status"}>
+        <span className="toast-icon">{toast.kind === "success" ? <CircleCheck size={20} /> : toast.kind === "info" ? <Info size={20} /> : <CircleAlert size={20} />}</span>
+        <span className="toast-message-text">{toast.message}</span><button type="button" className="toast-dismiss" onClick={dismissToast} aria-label="Dismiss notification"><X size={16} /></button>
+      </div></div>}
+      {previewFile && <FilePreviewModal file={previewFile} previewUrl={previewUrl} onClose={handleClosePreview} />}
+      <ChatPanel isOpen={isChatOpen} onClose={() => setIsChatOpen(false)} messages={chatMessages} selfPeerId={selfPeerId} username={username} avatar={settings.avatar} onSendMessage={sendChatMessage} connected={connected} roomId={inRoom ? roomId : ""} />
+      <SettingsModal isOpen={isSettingsOpen} onClose={() => setIsSettingsOpen(false)} settings={settings} username={username} avatar={settings.avatar} onUpdateSettings={updateSettings} />
     </div>
   );
 }

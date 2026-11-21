@@ -1,6 +1,7 @@
 import { Clock, Download } from "lucide-react";
 import type { ReceivingFile } from "../types";
 import { formatBytes, formatTime, calculateETA } from "../utils/helpers";
+import "./transfer-workspace.css";
 
 interface ReceiveProgressProps {
     receivings: ReceivingFile[];

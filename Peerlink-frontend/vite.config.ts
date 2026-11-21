@@ -18,25 +18,25 @@ export default defineConfig({
         type: 'module',
         navigateFallback: 'index.html'
       },
-      includeAssets: ['peerlink-logo.png', 'favicon.ico'],
+      includeAssets: ['peerlink-mark.svg', 'peerlink-icon.svg', 'peerlink-icon-32.png', 'peerlink-icon-180.png'],
       manifest: {
         name: 'PeerLink',
         short_name: 'PeerLink',
         description: 'Fast peer-to-peer file transfer',
-        theme_color: '#0a0a0a',
-        background_color: '#0a0a0a',
+        theme_color: '#121612',
+        background_color: '#121612',
         display: 'standalone',
         orientation: 'portrait',
         scope: '/',
         start_url: '/',
         icons: [
           {
-            src: 'peerlink-logo.png',
+            src: 'peerlink-icon-192.png',
             sizes: '192x192',
             type: 'image/png'
           },
           {
-            src: 'peerlink-logo.png',
+            src: 'peerlink-icon-512.png',
             sizes: '512x512',
             type: 'image/png'
           }
@@ -45,6 +45,7 @@ export default defineConfig({
       injectManifest: {
         injectionPoint: 'self.__WB_MANIFEST',
         globPatterns: ['**/*.{js,css,html,ico,png,svg,woff2}'],
+        globIgnores: ['webrtc-loopback-test.html', 'vite.svg', 'peerlink-logo.png'],
         maximumFileSizeToCacheInBytes: 2 * 1024 * 1024
       }
     })

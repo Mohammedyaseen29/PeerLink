@@ -1,8 +1,9 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { AlertCircle, Check, File, FolderOpen, Upload, X } from "lucide-react";
+import { AlertCircle, Check, File, Files, FolderOpen, LockKeyhole, Upload, X } from "lucide-react";
 import { formatBytes, getFileMimeType } from "../utils/helpers";
 import { FileThumbnail } from "./FileThumbnail";
 import "./transfer-workspace.css";
+import "./uploader.css";
 
 interface FileUploaderProps {
     onFilesSelect: (files: File[]) => Promise<boolean>;
@@ -189,27 +190,44 @@ export function FileUploader({ onFilesSelect, canSend = false, disabled = false 
     };
 
     return (
-        <section className="file-uploader" aria-label="Choose files to send">
+        <section className={`file-uploader ${staged.length > 0 ? "has-staged-files" : ""}`} aria-label="Choose files to send">
             <div
-                className={`drop-zone upload-tool ${isDragOver ? "drag-over" : ""} ${disabled ? "disabled" : ""}`}
+                className={`drop-zone transfer-drop-zone ${isDragOver ? "drag-over" : ""} ${disabled ? "disabled" : ""} ${canSend ? "is-ready" : "is-waiting"}`}
                 onDragOver={handleDragOver}
                 onDragLeave={handleDragLeave}
                 onDrop={handleDrop}
                 aria-disabled={disabled}
             >
-                <div className="upload-tool-copy">
-                    <span className="upload-tool-mark" aria-hidden="true"><Upload size={19} /></span>
-                    <div className="upload-tool-text">
-                        <p className="drop-text">Drop files or folders here</p>
-                        <p className="drop-subtext">Choose files to stage them. Nothing sends until you press Send.</p>
-                        {isReadingDrop && <p className="drop-subtext upload-reading" role="status">Reading dropped folder…</p>}
+                <div className="drop-zone-topline">
+                    <span className="eyebrow">THE TRANSFER SPACE</span>
+                    <span className={`drop-availability ${canSend ? "ready" : ""}`}><span aria-hidden="true" />{canSend ? "Ready for the handoff" : "Prepare your files"}</span>
+                </div>
+                <div className="upload-art" aria-hidden="true">
+                    <div className="transfer-orbit orbit-one"><span className="orbit-packet" /></div>
+                    <div className="transfer-orbit orbit-two"><span className="orbit-packet" /></div>
+                    <span className="orbit-device source-device">YOU</span>
+                    <span className="orbit-device target-device">PEER</span>
+                    <div className="file-stack">
+                        <div className="art-file file-back"><span>.zip</span></div>
+                        <div className="art-file file-middle"><span>.mov</span></div>
+                        <div className="art-file file-front">
+                            <File size={33} strokeWidth={1.4} />
+                            <span className="art-file-rule" /><span className="art-file-rule short" />
+                            <span className="art-file-caption">.anything</span>
+                            <span className="art-upload-stamp"><Upload size={16} /></span>
+                        </div>
                     </div>
+                </div>
+                <div className="drop-zone-copy">
+                    <h2>{isDragOver ? "And… drop." : "Drop your files here."}</h2>
+                    <p>Choose files or a whole folder. Review your selection, then press Send.</p>
+                    {isReadingDrop && <p className="upload-reading" role="status">Reading dropped folder…</p>}
                 </div>
 
                 <div className="upload-buttons">
                     <input ref={fileInputRef} type="file" multiple onChange={handleFileSelect} className="hidden" disabled={disabled} />
                     <button type="button" onClick={() => fileInputRef.current?.click()} className="btn btn-primary upload-select-files" disabled={disabled}>
-                        <File size={18} aria-hidden="true" />
+                        <Files size={18} aria-hidden="true" />
                         <span>Select files</span>
                     </button>
 
@@ -233,6 +251,7 @@ export function FileUploader({ onFilesSelect, canSend = false, disabled = false 
                         <p className="folder-fallback">Folder picker unavailable in this browser.</p>
                     )}
                 </div>
+                <div className="drop-zone-footnote"><LockKeyhole size={13} aria-hidden="true" /><span>Encrypted in transit. Shared device to device.</span></div>
             </div>
 
             {staged.length > 0 && (

@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { Camera, LoaderCircle, QrCode, RefreshCw, X } from "lucide-react";
 import { parseRoomInvite, type RoomInvite } from "../utils/roomInvite";
+import "./room.css";
 
 const PRODUCTION_ORIGIN = "https://peer-link-rho.vercel.app";
 

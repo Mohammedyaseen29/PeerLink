@@ -60,6 +60,86 @@ const MAX_PREVIEW_REQUESTS = 8;
 const PREVIEW_REQUEST_TIMEOUT_MS = 22_000;
 const PREVIEW_BUFFER_HIGH_WATER = 512 * 1024;
 const SIGNALING_HEARTBEAT_INTERVAL_MS = 25_000;
+
+/** Keep the signaling handle stable while native sockets reconnect. RTC sessions
+ * capture this handle, so directory recovery never replaces a healthy transport. */
+class RoomSignalingSocket {
+    onopen: ((event: Event) => void) | null = null;
+    onclose: ((event: CloseEvent) => void) | null = null;
+    onerror: ((event: Event) => void) | null = null;
+    onmessage: ((event: MessageEvent) => void) | null = null;
+    private socket: WebSocket | null = null;
+    private timer: number | undefined;
+    private watchdog: number | undefined;
+    private stopped = false;
+    private joined = false;
+    private attempts = 0;
+    private lastMessage = Date.now();
+    private url: string;
+    private recovering: () => void;
+    constructor(url: string, recovering: () => void) { this.url = url; this.recovering = recovering; this.connect(); }
+    get readyState() { return this.socket?.readyState ?? (this.stopped ? WebSocket.CLOSED : WebSocket.CONNECTING); }
+    send(message: string) {
+        if (this.socket?.readyState !== WebSocket.OPEN) throw new Error('The signaling connection is closed.');
+        this.socket.send(message);
+    }
+    private detach() {
+        const socket = this.socket; this.socket = null;
+        if (!socket) return;
+        socket.onopen = null; socket.onclose = null; socket.onerror = null; socket.onmessage = null;
+        try { socket.close(); } catch { /* Already closed. */ }
+    }
+    private clearTimer() { if (this.timer !== undefined) window.clearTimeout(this.timer); this.timer = undefined; }
+    private connect() {
+        if (this.stopped) return;
+        this.clearTimer();
+        let socket: WebSocket;
+        try { socket = new WebSocket(this.url); } catch { this.retry(); return; }
+        this.socket = socket;
+        this.timer = window.setTimeout(() => this.retry(), 15_000);
+        socket.onopen = event => { if (this.socket === socket && !this.stopped) this.onopen?.(event); };
+        socket.onmessage = event => {
+            if (this.socket !== socket || this.stopped) return;
+            this.lastMessage = Date.now();
+            try {
+                if (JSON.parse(event.data).type === 'joined') {
+                    this.joined = true; this.attempts = 0; this.clearTimer();
+                    if (this.watchdog === undefined) this.watchdog = window.setInterval(() => {
+                        if (this.socket?.readyState === WebSocket.OPEN && Date.now() - this.lastMessage > 75_000) this.retry();
+                    }, 25_000);
+                }
+            } catch { /* The room handler validates messages. */ }
+            this.onmessage?.(event);
+        };
+        socket.onerror = () => { if (this.socket === socket && !this.stopped) this.retry(); };
+        socket.onclose = event => {
+            if (this.socket !== socket || this.stopped) return;
+            if ([4000, 4001, 4002, 4003].includes(event.code)) { this.close(); this.onclose?.(event); }
+            else this.retry();
+        };
+    }
+    private retry() {
+        if (this.stopped) return;
+        this.clearTimer(); this.detach();
+        if (!this.joined && this.attempts >= 3) {
+            this.close(); this.onerror?.(new Event('error')); return;
+        }
+        this.recovering();
+        const delay = [1_000, 2_000, 4_000, 8_000, 15_000][Math.min(this.attempts++, 4)];
+        this.timer = window.setTimeout(() => this.connect(), delay);
+    }
+    wake() {
+        if (this.stopped) return;
+        if (this.socket?.readyState !== WebSocket.OPEN || Date.now() - this.lastMessage > 75_000) {
+            this.clearTimer(); this.detach(); this.connect();
+        }
+    }
+    close() {
+        this.stopped = true; this.clearTimer();
+        if (this.watchdog !== undefined) window.clearInterval(this.watchdog);
+        this.watchdog = undefined; this.detach();
+    }
+}
 const RECONNECT_DELAYS_MS = [1_000, 5_000, 15_000] as const;
 const NEGOTIATION_TIMEOUT_MS = 45_000;
 const previewFrameEncoder = new TextEncoder();
@@ -333,7 +413,7 @@ export function useP2P() {
         aggregateMetrics.current.disposed = values.every(value => value.disposed);
         return aggregateMetrics.current;
     };
-    const ws = useRef<WebSocket | null>(null);
+    const ws = useRef<RoomSignalingSocket | null>(null);
     const clearSignalingMonitor = useRef<() => void>(() => undefined);
     const retryPeerRef = useRef<(peerId: string) => void>(() => undefined);
     const currentRoom = useRef('');
@@ -624,13 +704,24 @@ export function useP2P() {
             if (previewBroker.current === broker) previewBroker.current = null;
             for (const session of [...sessions.current.values()]) session.dispose?.(false);
             disconnectPeer();
-            if (ws.current) { ws.current.onclose = null; ws.current.onmessage = null; ws.current.close(); ws.current = null; }
+            if (ws.current) {
+                if (ws.current.readyState === WebSocket.OPEN) {
+                    try { ws.current.send(JSON.stringify({ type: 'leave', roomId: currentRoom.current })); } catch { /* Best effort on unmount. */ }
+                }
+                ws.current.onclose = null; ws.current.onmessage = null; ws.current.close(); ws.current = null;
+            }
             if (temporary.current && currentRoom.current) void clearTemporaryFiles(currentRoom.current).catch(() => undefined);
         };
     }, [disconnectPeer, requestRemoteRange, showToast]);
 
     useEffect(() => {
-        const onPageHide = () => {
+        const onPageHide = (event: PageTransitionEvent) => {
+            if (event.persisted) return;
+            if (ws.current?.readyState === WebSocket.OPEN) {
+                try { ws.current.send(JSON.stringify({ type: 'leave', roomId: currentRoom.current })); } catch { /* Best effort on tab close. */ }
+            }
+            clearSignalingMonitor.current(); ws.current?.close();
+            for (const session of [...sessions.current.values()]) session.dispose?.(false);
             if (temporary.current && currentRoom.current) void clearTemporaryFiles(currentRoom.current).catch(() => undefined);
         };
         window.addEventListener('pagehide', onPageHide);
@@ -1160,7 +1251,10 @@ export function useP2P() {
             if (newRoomType === 'persistent') void restoreSavedRoomFiles();
             return;
         }
-        const socket = new WebSocket(import.meta.env.VITE_SIGNALING_SERVER_URL); ws.current = socket;
+        const resumeToken = crypto.randomUUID();
+        const socket = new RoomSignalingSocket(import.meta.env.VITE_SIGNALING_SERVER_URL, () => {
+            if (live.current && currentRoom.current === room) setSignalingStatus('offline');
+        }); ws.current = socket;
         let joinedRoom = false;
         let joinedProfileUpdated = false;
         let signaling = Promise.resolve();
@@ -1180,7 +1274,10 @@ export function useP2P() {
                 setSignalingStatus('waiting');
                 return;
             }
-            if ([...sessions.current.values()].some(session => session.status === 'connected')) return;
+            if ([...sessions.current.values()].some(session => session.status === 'connected')) {
+                setSignalingStatus('negotiating');
+                return;
+            }
             const negotiating = [...sessions.current.values()].some(session => session.status === 'connecting') ||
                 [...recovery].some(([peerId, state]) => roomPeers.has(peerId) && state.inFlight);
             setSignalingStatus(negotiating ? 'negotiating' : 'unreachable');
@@ -1254,8 +1351,8 @@ export function useP2P() {
             try { send({ type: 'heartbeat', roomId: room }); send({ type: 'sync', roomId: room }); }
             catch { /* The WebSocket close event owns room membership cleanup. */ }
         };
-        const onWindowFocus = () => requestRoomSync();
-        const onVisibilityChange = () => { if (document.visibilityState === 'visible') requestRoomSync(); };
+        const onWindowFocus = () => { socket.wake(); requestRoomSync(); };
+        const onVisibilityChange = () => { if (document.visibilityState === 'visible') onWindowFocus(); };
         const startMonitoring = () => {
             if (heartbeatTimer !== undefined) return;
             heartbeatTimer = window.setInterval(() => {
@@ -1385,6 +1482,11 @@ export function useP2P() {
                 const present = new Set(peers.map(peer => peer.peerId));
                 for (const peerId of known) {
                     if (present.has(peerId)) continue;
+                    // A delayed directory snapshot must not tear down an open
+                    // direct connection while that peer restores signaling.
+                    const session = sessions.current.get(peerId);
+                    const member = roomPeers.get(peerId);
+                    if (session?.status === 'connected' && member) { peers.push({ ...member, avatar: member.avatar, supportsReconnect: member.supportsReconnect === true }); continue; }
                     sessions.current.get(peerId)?.dispose?.(false);
                     markRecipientUnavailable(peerId);
                     clearRecovery(peerId); offering.delete(peerId); roomPeers.delete(peerId);
@@ -1404,19 +1506,19 @@ export function useP2P() {
                 return { ...peer, status: session?.status ?? previous?.status ?? 'connecting',
                     connectionType: session?.connectionType ?? previous?.connectionType ?? 'disconnected' };
             }));
-            for (const peer of peers) if (!known.has(peer.peerId)) ensureSignaledSession(peer);
+            for (const peer of peers) if (!sessions.current.has(peer.peerId)) ensureSignaledSession(peer);
             refreshRoomSignalingStatus();
         };
         socket.onopen = () => {
             void (async () => {
                 try {
                     // Complete temporary-room cleanup before announcing membership to peers.
-                    if (newRoomType === 'temporary') await clearTemporaryFiles(room);
-                    else if (newRoomType === 'persistent') void navigator.storage?.persist?.().catch(() => undefined);
+                    if (!joinedRoom && newRoomType === 'temporary') await clearTemporaryFiles(room);
+                    else if (!joinedRoom && newRoomType === 'persistent') void navigator.storage?.persist?.().catch(() => undefined);
                     if (!live.current || socket !== ws.current || currentRoom.current !== room) return;
-                    if (newRoomType === 'temporary') replaceReceivedFiles([]);
-                    send({ type: 'join', protocolVersion: 2, roomId: room, roomType: newRoomType, username: identityRef.current, avatar: options.current.avatar,
-                        heartbeat: true, supportsReconnect: true });
+                    if (!joinedRoom && newRoomType === 'temporary') replaceReceivedFiles([]);
+                    send({ type: 'join', protocolVersion: 2, roomId: room, roomType: temporary.current ? 'temporary' : 'persistent', username: identityRef.current, avatar: options.current.avatar,
+                        heartbeat: true, supportsReconnect: true, resumeToken });
                 } catch (error) { failSignaling(error instanceof Error ? error.message : String(error)); }
             })();
         };
@@ -1489,7 +1591,9 @@ export function useP2P() {
                 }
                 if (msg.type === 'joined') {
                     if (msg.protocolVersion !== 2 || typeof msg.peerId !== 'string' || !Array.isArray(msg.peers)) { failSignaling('The signaling server returned an incompatible room response.'); return; }
+                    const firstJoin = !joinedRoom;
                     joinedRoom = true; selfPeerIdRef.current = msg.peerId; setSelfPeerId(msg.peerId);
+                    joinedProfileUpdated = false;
                     if (!joinedProfileUpdated) {
                         joinedProfileUpdated = true;
                         try { send({ type: 'profile_update', username: identityRef.current, avatar: options.current.avatar }); }
@@ -1497,11 +1601,11 @@ export function useP2P() {
                     }
                     const confirmedType: RoomType = msg.roomType === 'temporary' ? 'temporary' : 'persistent';
                     temporary.current = confirmedType === 'temporary'; setRoomType(confirmedType); setInRoom(true);
-                    if (confirmedType === 'temporary') {
+                    if (firstJoin && confirmedType === 'temporary') {
                         await clearTemporaryFiles(room);
                         if (!live.current || socket !== ws.current || currentRoom.current !== room) return;
                         replaceReceivedFiles([]);
-                    } else {
+                    } else if (firstJoin) {
                         await restoreSavedRoomFiles();
                         if (!live.current || socket !== ws.current || currentRoom.current !== room) return;
                     }
@@ -1510,8 +1614,12 @@ export function useP2P() {
                     setSelectedPeerIds(peerIds);
                     setHasPeer(peerIds.length > 0); refreshRoomSignalingStatus();
                     startMonitoring();
+                    if (!firstJoin) for (const session of sessions.current.values()) {
+                        if (session.status !== 'connected') onTransportLost(session);
+                    }
                     return;
                 }
+                if (msg.type === 'peer_disconnected') return;
                 if (msg.type === 'heartbeat_ack') return;
                 if (msg.type === 'room_state') {
                     if (msg.roomId !== room || !Array.isArray(msg.peers)) return;
@@ -1621,6 +1729,7 @@ export function useP2P() {
         };
     };
     const retryConnection = () => {
+        if (ws.current) { ws.current.wake(); return; }
         if (currentRoom.current && !ws.current) join(currentRoom.current, temporary.current ? 'temporary' : 'persistent');
     };
     const retryPeerConnection = useCallback((peerId: string) => retryPeerRef.current(peerId), []);

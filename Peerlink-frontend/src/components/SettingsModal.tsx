@@ -3,6 +3,7 @@ import { Check, Download, Settings, X } from "lucide-react";
 import type { Settings as SettingsType } from "../types";
 import { Avatar } from "./Avatar";
 import { AVATARS } from "./avatars";
+import "./room.css";
 
 interface SettingsModalProps {
     isOpen: boolean;
@@ -27,7 +28,7 @@ export function SettingsModal({ isOpen, onClose, settings, username, avatar, onU
     }, [settings, username, avatar, isOpen]);
 
     const trimmedUsername = editedUsername.trim();
-    const hasControlCharacters = /[\u0000-\u001f\u007f]/.test(trimmedUsername);
+    const hasControlCharacters = /[\u0000-\u001f\u007f-\u009f]/.test(trimmedUsername);
     const usernameValid = trimmedUsername.length >= 1 && trimmedUsername.length <= 64 && !hasControlCharacters;
     const usernameError = trimmedUsername.length === 0
         ? "Display name is required."
@@ -51,7 +52,7 @@ export function SettingsModal({ isOpen, onClose, settings, username, avatar, onU
         <div className="settings-modal-overlay">
             <div className="settings-modal-backdrop" onClick={onClose} />
 
-            <div className="settings-modal" role="dialog" aria-modal="true" aria-labelledby="settings-modal-title">
+            <div className="settings-modal peer-settings" role="dialog" aria-modal="true" aria-labelledby="settings-modal-title">
                 <div className="settings-modal-header">
                     <div className="settings-modal-title">
                         <Settings size={22} aria-hidden="true" />

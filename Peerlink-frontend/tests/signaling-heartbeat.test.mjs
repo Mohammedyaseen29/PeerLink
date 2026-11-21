@@ -31,10 +31,12 @@ try {
     let alarmAt = null;
     const sockets = [];
     const storage = {
+        async get() { return undefined; },
+        async put() {},
         async getAlarm() { return alarmAt; },
         async setAlarm(at) { alarmAt = at; },
     };
-    const room = new SignalingRoom({ getWebSockets: () => sockets, storage }, {});
+    const room = new SignalingRoom({ getWebSockets: () => sockets, storage, blockConcurrencyWhile: callback => callback() }, {});
     class FakeSocket {
         readyState = 1;
         attachment = null;

@@ -371,6 +371,17 @@ function Tests() {
             await peers[0].addFilesToQueue([big]);
             await until(() => Boolean(peers[0].sendQueue[0]?.startTime), 'large file send starts');
             const startedAt = peers[0].sendQueue[0]!.startTime!;
+            const originalPeerIds = peers.map(peer => peer.selfPeerId);
+            const originalRtcCount = rtcPeers.length;
+            const interrupted = signalingSockets.find(entry => entry.peerId === originalPeerIds[0] && entry.socket.readyState === WebSocket.OPEN)!;
+            interrupted.socket.close(1000, 'Regression: transient signaling loss during transfer');
+            await until(() => signalingSockets.some(entry => entry !== interrupted && entry.peerId === originalPeerIds[0] && entry.socket.readyState === WebSocket.OPEN),
+                'signaling rejoins with the same protocol2 peer identity', 30_000);
+            await until(() => peers[0].signalingStatus !== 'offline', 'restored signaling clears its outage status');
+            if (!peers.every((peer, index) => peer.connected && peer.inRoom && peer.selfPeerId === originalPeerIds[index]) || rtcPeers.length !== originalRtcCount) {
+                throw new Error('Signaling recovery replaced a live RTC connection or room identity');
+            }
+            append('PASS: signaling drop/rejoin preserved protocol2 peer IDs, existing RTC links, and active transfer');
             await until(() => peers[0].sendQueue[0]?.status === 'sent', 'large file committed');
             const seconds = (Date.now() - startedAt) / 1000;
             append(`${sizeMiB} MiB sender start to receiver commit in ${seconds.toFixed(2)}s: ${(big.size / 1048576 / seconds).toFixed(2)} MiB/s`);

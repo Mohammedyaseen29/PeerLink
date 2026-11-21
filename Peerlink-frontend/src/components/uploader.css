@@ -1,0 +1,71 @@
+.file-uploader { min-width: 0; height: 100%; }
+.file-uploader.has-staged-files { height: auto; }
+.file-uploader.has-staged-files .drop-zone { height: auto; }
+.drop-zone {
+    position: relative; isolation: isolate; overflow: hidden; height: 100%; min-height: 488px;
+    display: flex; align-items: center; justify-content: center; flex-direction: column;
+    padding: 55px 30px 35px; border: 1px solid #343e32; border-radius: 24px;
+    background: radial-gradient(ellipse at 50% 24%, #a9cb5520, transparent 58%), #1b211a;
+    transition: border-color 250ms, background-color 250ms, box-shadow 250ms;
+}
+.drop-zone::after {
+    position: absolute; inset: 0; content: ""; pointer-events: none; z-index: -1; opacity: .15;
+    background-image: radial-gradient(#b5c795 1px, transparent 1px); background-size: 22px 22px;
+    mask-image: linear-gradient(transparent, #000 20%, transparent 80%);
+}
+.drop-zone-topline { position: absolute; top: 26px; left: 30px; right: 30px; display: flex; justify-content: space-between; align-items: center; gap: 14px; }
+.drop-zone-topline .eyebrow { color: #a7b298; font-size: .75rem; letter-spacing: .12em; }
+.drop-availability { display: flex; align-items: center; gap: 7px; color: #a8b19f; font-size: .75rem; }
+.drop-availability > span { height: 5px; width: 5px; border-radius: 50%; background: #89937f; }
+.drop-availability.ready { color: #c4f55a; }
+.drop-availability.ready > span { background: #c4f55a; box-shadow: 0 0 12px #c4f55a55; }
+.upload-art { position: relative; width: min(380px, 100%); height: 222px; margin-top: 10px; perspective: 900px; }
+.transfer-orbit { position: absolute; width: 340px; height: 126px; border: 1px solid #b8d98c24; border-radius: 50%; top: 47px; left: calc(50% - 170px); }
+.orbit-one { transform: rotate(-16deg); }
+.orbit-two { width: 290px; height: 144px; top: 40px; left: calc(50% - 145px); transform: rotate(29deg); border-color: #b8d98c13; }
+.orbit-packet { position: absolute; left: 50%; top: 50%; width: 5px; height: 5px; background: #c4f55a; border-radius: 50%; offset-path: ellipse(170px 63px at 0 0); animation: orbit-travel 11s linear infinite; box-shadow: 0 0 12px #c4f55a66; }
+.orbit-two .orbit-packet { offset-path: ellipse(145px 72px at 0 0); animation-duration: 17s; animation-delay: -7s; background: #93a77d; }
+.orbit-device { position: absolute; z-index: 3; padding: 5px 9px; font-family: Consolas, monospace; font-size: .5625rem; letter-spacing: .1em; border: 1px solid #4f5f3e; background: #26301f; color: #cbdcaf; border-radius: 20px; }
+.source-device { left: 4px; top: 122px; }
+.target-device { right: 3px; top: 70px; color: #9ba692; border-color: #3d4837; background: #20271e; }
+.is-ready .target-device { color: #c4f55a; border-color: #7a9851; }
+.file-stack { position: absolute; width: 104px; height: 136px; top: 48px; left: calc(50% - 52px); animation: file-float 6s ease-in-out infinite; }
+.art-file { position: absolute; width: 104px; height: 134px; border: 1px solid #59664c; border-radius: 12px; background: #303c27; box-shadow: 0 14px 36px #070c0755; }
+.file-back { transform: rotate(-22deg) translate(-33px, -5px); color: #a9b59c; background: #283021; }
+.file-back > span, .file-middle > span { position: absolute; right: 12px; bottom: 12px; font-family: Consolas, monospace; font-size: .625rem; }
+.file-middle { transform: rotate(15deg) translate(25px, -9px); background: #46543a; border-color: #748465; color: #d3ddc6; }
+.file-front { transform: rotate(-4deg); padding: 15px; background: #d9efb6; color: #293d19; border-color: #e0f5bf; }
+.art-file-rule { display: block; width: 48px; height: 3px; background: #78955766; border-radius: 4px; margin-top: 14px; }
+.art-file-rule.short { width: 33px; margin-top: 5px; }
+.art-file-caption { position: absolute; left: 14px; bottom: 14px; font-family: Consolas, monospace; font-size: .625rem; font-weight: 600; }
+.art-upload-stamp { position: absolute; right: -14px; bottom: 22px; width: 32px; height: 32px; display: grid; place-items: center; border-radius: 50%; background: #c4f55a; color: #263710; border: 3px solid #1c2319; }
+.drop-zone-copy { text-align: center; position: relative; margin-top: 5px; }
+.drop-zone-copy h2 { font-size: 1.75rem; font-weight: 500; letter-spacing: -.9px; color: #eef5e8; line-height: 1.25; }
+.drop-zone-copy p { color: #a6b09e; font-size: .875rem; max-width: 340px; line-height: 1.65; margin-top: 9px; }
+.upload-buttons { display: flex; align-items: center; justify-content: center; flex-wrap: wrap; max-width: 100%; gap: 10px; margin-top: 22px; }
+.upload-buttons .btn { min-height: 44px; padding-inline: 18px; }
+.upload-buttons .btn:disabled { opacity: 1; background: #35402c; color: #a7b29a; border-color: #435036; }
+.upload-buttons .btn-secondary:disabled { background: transparent; border-color: #3c4736; }
+.drop-zone-footnote { display: flex; align-items: center; gap: 6px; color: #8d9b82; font-size: .75rem; margin-top: 18px; }
+.drop-zone.drag-over { border-color: #c4f55a; box-shadow: inset 0 0 0 2px #c4f55a, 0 0 60px #c4f55a0a; background-color: #24321a; }
+.drag-over .file-stack { animation-duration: 1.4s; }
+.drag-over .orbit-packet { animation-duration: 1.4s; }
+.drop-zone:hover .file-front { transform: rotate(0deg) translateY(-5px); }
+.art-file { transition: transform 400ms cubic-bezier(.2,.8,.2,1); }
+@keyframes orbit-travel { to { offset-distance: 100%; } }
+@keyframes file-float { 0%, 100% { transform: translateY(0) rotate(-2deg); } 50% { transform: translateY(-9px) rotate(2deg); } }
+@media (max-width: 650px) {
+    .drop-zone { border-radius: 20px; padding: 50px 20px 28px; min-height: 455px; }
+    .drop-zone-topline { top: 23px; left: 20px; right: 20px; }
+    .drop-zone-topline .eyebrow { font-size: .75rem; }
+    .drop-availability { font-size: .75rem; }
+    .upload-art { height: 205px; transform: scale(.9); margin-top: 4px; }
+    .drop-zone-copy h2 { font-size: 1.5rem; }
+    .drop-zone-copy p { font-size: .875rem; }
+    .drop-zone-footnote { font-size: .75rem; }
+    .upload-buttons .btn { padding-inline: 14px; }
+}
+@media (prefers-reduced-motion: reduce) {
+    .file-stack, .orbit-packet { animation: none; }
+    .art-file, .drop-zone { transition: none; }
+}

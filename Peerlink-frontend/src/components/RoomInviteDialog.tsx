@@ -3,6 +3,7 @@ import { Check, Copy, QrCode, X } from "lucide-react";
 import { QRCodeSVG } from "qrcode.react";
 import type { RoomType } from "../types";
 import { buildRoomInviteUrl } from "../utils/roomInvite";
+import "./room.css";
 
 interface RoomInviteDialogProps {
   isOpen: boolean;
