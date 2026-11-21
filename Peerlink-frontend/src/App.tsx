@@ -12,14 +12,18 @@ import {
   ChatPanel,
   SettingsModal,
 } from "./components";
-import { releasePreviewUrl, type FileMetadata } from "./ProgressDB";
+import { clearRoom as clearStoredRoom, deleteFile as deleteStoredFile, releasePreviewUrl, type FileMetadata } from "./ProgressDB";
 import { getFileMimeType } from "./utils/helpers";
 import type { QueuedFile, RoomType, SignalingStatus } from "./types";
 import { registerPeerLinkServiceWorker } from "./serviceWorker";
-import { CircleAlert, CircleCheck, Copy, FolderOpen, Info, LoaderCircle, MessageCircle, RefreshCw, ShieldCheck, UserPlus, WifiOff, X } from "lucide-react";
+import { CircleAlert, CircleCheck, Clock3, Copy, FolderOpen, HardDrive, Info, LoaderCircle, MessageCircle, RefreshCw, ShieldCheck, UserPlus, WifiOff, X } from "lucide-react";
 import { parseRoomInvite } from "./utils/roomInvite";
 import { BrandMark } from "./components/BrandMark";
 import { isReceivedCopy } from "./utils/receivedFiles";
+import { useSavedRooms } from "./hooks/useSavedRooms";
+import { RecentRooms } from "./components/RecentRooms";
+
+const NO_FILES: FileMetadata[] = [];
 
 function getRoomStatusCopy(status: SignalingStatus, roomType: RoomType, canRetryPeer: boolean) {
   switch (status) {
@@ -104,6 +108,18 @@ function App() {
     notifyError,
     getTransferDiagnostics,
   } = useP2P();
+  const savedRooms = useSavedRooms(receivedFiles, inRoom);
+  const [savedRoomId, setSavedRoomId] = useState<string | null>(null);
+  const showingSavedRoom = savedRoomId !== null && !inRoom;
+  const savedRoom = savedRooms.rooms.find(room => room.roomId === savedRoomId);
+  const visibleReceivedFiles = showingSavedRoom ? savedRoom?.files ?? NO_FILES : receivedFiles;
+  const savedRoomHeading = useRef<HTMLHeadingElement>(null);
+  const wasShowingSavedRoom = useRef(false);
+  useEffect(() => {
+    if (showingSavedRoom) savedRoomHeading.current?.focus();
+    else if (wasShowingSavedRoom.current) document.getElementById("recent-rooms-title")?.focus();
+    wasShowingSavedRoom.current = showingSavedRoom;
+  }, [showingSavedRoom, savedRoomId]);
   const unsupportedBrowser = signalingStatus === "unsupported";
   const showTransferControls = !unsupportedBrowser && signalingStatus !== "full";
   const showRoomMembers = showTransferControls && members.length > 0;
@@ -287,6 +303,24 @@ function App() {
     setPreviewError(null);
   };
 
+  const handleDeleteSavedFile = async (file: FileMetadata) => {
+    if (!window.confirm(`Delete "${file.name}" from this device?`)) return;
+    try {
+      await deleteStoredFile(file.fileId);
+      await savedRooms.refresh();
+      notifyError("File deleted from this device.", "success");
+    } catch { notifyError("This file couldn’t be removed. Try again."); }
+  };
+
+  const handleClearSavedRoom = async () => {
+    if (!savedRoomId || !window.confirm(`Delete all stored files from room "${savedRoomId}"?`)) return;
+    try {
+      await clearStoredRoom(savedRoomId);
+      await savedRooms.refresh();
+      notifyError("Stored room files deleted.", "success");
+    } catch { notifyError("These files couldn’t be removed. Try again."); }
+  };
+
   useEffect(() => {
     if (!previewFile) return;
     if (previewFile.fileId.startsWith("q-")) {
@@ -299,18 +333,18 @@ function App() {
       return;
     }
     if (previewFile.remoteFileId) {
-      const local = receivedFiles.find(file => isReceivedCopy(file, previewFile));
+      const local = visibleReceivedFiles.find(file => isReceivedCopy(file, previewFile));
       if (local) { void handlePreview(local); return; }
     }
     if (!onlineFiles.some(file => file.fileId === previewFile.fileId) &&
-        !receivedFiles.some(file => file.fileId === previewFile.fileId)) {
-      const local = receivedFiles.find(file => isReceivedCopy(file, previewFile));
+        !visibleReceivedFiles.some(file => file.fileId === previewFile.fileId)) {
+      const local = visibleReceivedFiles.find(file => isReceivedCopy(file, previewFile));
       if (local) void handlePreview(local);
       else handleClosePreview();
     }
   // Close a local preview if its stored file was deleted.
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [receivedFiles, onlineFiles, sendQueue, previewFile]);
+  }, [visibleReceivedFiles, onlineFiles, sendQueue, previewFile]);
 
   return (
     <div className="app-container peerlink-app">
@@ -343,13 +377,26 @@ function App() {
             <button type="button" className="toast-dismiss" onClick={() => setAppUpdateReady(false)} aria-label="Dismiss update notice"><X size={16} /></button>
           </div>
         )}
-        <header className="page-heading">
+        {!showingSavedRoom && <header className="page-heading">
           <div className="headline-group">
             <div className="headline-kicker"><span className="kicker-line" />A DIRECT CONNECTION. A SHARED SPACE.</div>
             <h1>Make the <span>handoff.</span></h1>
+            {!inRoom && savedRooms.rooms.length > 0 && <a className="recent-rooms-jump" href="#recent-rooms-title"><Clock3 size={16} />Recent rooms<span>{savedRooms.rooms.length}</span></a>}
           </div>
           <p className="intro-description">Files, folders, and a conversation.<br /> From your device, straight to theirs.</p>
-        </header>
+        </header>}
+        {showingSavedRoom ? <section className="saved-room-view" aria-label="Saved room files">
+          <button type="button" className="saved-room-back" onClick={() => { handleClosePreview(); setSavedRoomId(null); }}>All recent rooms</button>
+          <div className="saved-room-heading">
+            <div><span className="recent-eyebrow"><HardDrive size={14} />SAVED ON THIS DEVICE</span><h2 ref={savedRoomHeading} tabIndex={-1}>{savedRoomId}</h2><p>Open the files you received here. Your peer doesn’t need to be online, and there’s no need to download them again.</p></div>
+            <button type="button" className="saved-room-join" onClick={() => { handleClosePreview(); setSavedRoomId(null); join(savedRoomId, "persistent"); }}><UserPlus size={17} />Join room to share</button>
+          </div>
+          {savedRooms.error && <div className="recent-room-message" role="alert"><p>{savedRooms.error}</p><button type="button" onClick={() => void savedRooms.refresh()}>Try again</button></div>}
+          <div className="saved-room-layout">
+            <ReceivedFiles key={savedRoomId} previewFirst files={visibleReceivedFiles} onlineFiles={NO_FILES} onDownload={downloadFile} onPreview={handlePreview} onDelete={handleDeleteSavedFile} onClearRoom={handleClearSavedRoom} />
+            <aside className="saved-room-note"><ShieldCheck size={24} /><strong>Already here. Just open it.</strong><p>These are your received copies, kept in this browser on this device.</p><p>Join the room when you want to send or receive more. Clearing this site’s browser data removes its saved files.</p></aside>
+          </div>
+        </section> : <>
         <div className="handoff-grid">
           <div className="room-column">
             <RoomConnection
@@ -378,6 +425,7 @@ function App() {
             )}
           </div>
         </div>
+        {!inRoom && <RecentRooms rooms={savedRooms.rooms} loading={savedRooms.loading} error={savedRooms.error} onRetry={() => void savedRooms.refresh()} onOpen={id => { handleClosePreview(); setSavedRoomId(id); }} />}
         {inRoom && (!connected || signalingStatus === "offline") && (
           <section className={"room-status workspace-room-status " + (connectionProblem ? "room-status-offline" : unsupportedBrowser ? "room-status-local" : "")} aria-label="Connection status">
             <div className="room-status-icon" aria-hidden="true"><RoomStatusIcon size={19} className={RoomStatusIcon === LoaderCircle ? "room-status-spinner" : undefined} /></div>
@@ -397,7 +445,7 @@ function App() {
           <textarea id="connection-details-text" readOnly value={manualDiagnostics} rows={6} onFocus={event => event.currentTarget.select()} />
           <button type="button" className="btn btn-secondary btn-sm" onClick={() => setManualDiagnostics(null)}>Dismiss details</button>
         </section>}
-        <section className="activity-section" aria-labelledby="activity-title">
+        {(inRoom || savedRooms.rooms.length === 0) && <section className="activity-section" aria-labelledby="activity-title">
           <div className="activity-heading">
             <div><span className="eyebrow">THE SHARED SPACE</span><h2 id="activity-title">In the room.</h2></div>
             <button type="button" className="activity-chat-link" onClick={() => setIsChatOpen(true)}><MessageCircle size={16} /><span>Room chat</span>{unreadCount > 0 && <span className="activity-unread">{unreadCount}</span>}</button>
@@ -413,8 +461,9 @@ function App() {
               <ReceivedFiles files={receivedFiles} onlineFiles={onlineFiles} onDownload={downloadFile} onPreview={handlePreview} onDelete={deleteReceivedFile} onClearRoom={clearRoom} />
             </div>
           </div>
-        </section>
-        <footer className="workspace-footer"><span><ShieldCheck size={14} />Encrypted in transit. No account needed.</span><span>Keep both devices open. We’ll handle the handoff.</span></footer>
+        </section>}
+        </>}
+        <footer className="workspace-footer"><span><ShieldCheck size={14} />Encrypted in transit. No account needed.</span><span>{showingSavedRoom ? "Your received files, available in this browser." : "Keep both devices open. We’ll handle the handoff."}</span></footer>
       </main>
       {toast && <div className="toast-overlay"><div className={"toast-body toast-" + toast.kind} role={toast.kind === "error" ? "alert" : "status"}>
         <span className="toast-icon">{toast.kind === "success" ? <CircleCheck size={20} /> : toast.kind === "info" ? <Info size={20} /> : <CircleAlert size={20} />}</span>

@@ -345,6 +345,7 @@ export class TransferEngine {
         const needsPersistence = incoming.meta.status !== 'complete';
         incoming.meta.status = 'complete';
         if (needsPersistence) {
+            incoming.meta.completedAt = Date.now();
             const storageStarted = performance.now();
             try { await saveMetaData(incoming.meta); }
             finally { this.metrics.storageMs += performance.now() - storageStarted; }
@@ -388,10 +389,12 @@ export class TransferEngine {
                 if (incoming.cancelled || this.disposed) return;
                 const committed = incoming.committed + batch.length;
                 const completesFile = committed === incoming.meta.totalChunks;
+                const completedAt = completesFile ? Date.now() : undefined;
                 const storageStarted = performance.now();
                 incoming.committing = true;
                 const storageCommit = saveChunks(incoming.meta.fileId, batch, {
                     ...incoming.meta, receivedChunks: committed, status: completesFile ? 'complete' : 'receiving',
+                    ...(completedAt === undefined ? {} : { completedAt }),
                 });
                 // Start at most one following batch's digest while this transaction commits.
                 // Partial batches still wait for the 128 ms coalescing timer.
@@ -407,7 +410,10 @@ export class TransferEngine {
                 if (incoming.cancelled || this.disposed) return;
                 incoming.committed = committed;
                 incoming.meta.receivedChunks = committed;
-                if (completesFile) incoming.meta.status = 'complete';
+                if (completesFile) {
+                    incoming.meta.status = 'complete';
+                    incoming.meta.completedAt = completedAt;
+                }
                 this.metrics.receivedBytes += batch.reduce((n, packet) => n + packet.data.byteLength, 0);
                 const chunkSize = incoming.meta.chunkSize ?? LEGACY_CHUNK_SIZE;
                 this.emitReceiving(incoming.meta, Math.min(committed * chunkSize, incoming.meta.size));

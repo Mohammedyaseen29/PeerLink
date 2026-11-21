@@ -84,3 +84,9 @@ Run `node tests/webrtc-transport-profile.cjs` from the frontend directory. It me
 Configure `PLAYWRIGHT_MODULE` and `PEERLINK_CHROME`. Optional `PEERLINK_PROFILE_WARM_MIB`, `PEERLINK_PROFILE_MEASURE_MIB`, `PEERLINK_PROFILE_CHUNK_BYTES`, `PEERLINK_PROFILE_HIGH_WATER_BYTES`, `PEERLINK_PROFILE_LOW_WATER_BYTES`, and `PEERLINK_PROFILE_DEADLINE_MS` configure the profile.
 
 This bypasses the app, signaling service, hashing, and IndexedDB. Compare it with the full-engine test before attributing a limit to application code. See the [October 10 investigation](../docs/webrtc-throughput-investigation.md) for verified results and rejected evidence.
+
+## Recent saved rooms
+
+Run `node --test tests/saved-rooms.test.mjs` for history eligibility, completion-time sorting, older saved-copy compatibility, and removal of empty rooms. History is derived from completed persistent receives; joining a room alone never creates an entry.
+
+For browser checks, open `/tests/saved-rooms.html` on the local Vite server and click **Seed saved rooms**. This writes only synthetic fixtures to the local preview origin. Check the six-card batch, **Show more rooms**, room/file/sender search, and long room names at 320px and desktop widths. Open a room and preview **Moodboard.svg**: it must decode from a local blob while **Room connections: 0** remains unchanged. The temporary and incomplete fixture rooms must stay absent. Reloading the page must retain the saved rooms. The fixture is not part of the production build.

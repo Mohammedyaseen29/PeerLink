@@ -25,6 +25,8 @@ export type FileMetadata = {
   receivedChunks: number;
   status: "receiving" | "complete" | "paused";
   createdAt: number;
+  /** Time the final receive batch was committed; older copies use createdAt. */
+  completedAt?: number;
   /** Whether this received copy may be re-advertised to room peers. */
   sharedWithRoom?: boolean;
   sourcePeerId?: string;
@@ -398,6 +400,16 @@ export async function getFilesInRoom(roomId: string): Promise<FileMetadata[]> {
       resolve(req.result as FileMetadata[]);
     };
     req.onerror = () => reject(req.error);
+  });
+}
+
+/** Metadata only: file bytes stay in the chunk store until previewed. */
+export async function getStoredFiles(): Promise<FileMetadata[]> {
+  const db = await openDB();
+  const request = db.transaction(FILE_STORE, "readonly").objectStore(FILE_STORE).getAll();
+  return new Promise((resolve, reject) => {
+    request.onsuccess = () => resolve(request.result as FileMetadata[]);
+    request.onerror = () => reject(request.error);
   });
 }
 

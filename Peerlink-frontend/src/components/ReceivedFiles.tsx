@@ -13,6 +13,7 @@ interface ReceivedFilesProps {
     onPreview: (file: FileMetadata) => void | Promise<void>;
     onDelete: (file: FileMetadata) => void;
     onClearRoom: () => void;
+    previewFirst?: boolean;
 }
 const fileIcons = { image: FileImage, video: FileVideo, audio: FileAudio, pdf: FileText, text: FileText, archive: Archive, file: File };
 type FileKind = "all" | "image" | "video" | "document" | "other";
@@ -22,7 +23,7 @@ function matchesKind(file: FileMetadata, kind: FileKind) {
         : kind === "other" ? !["image", "video", "pdf", "text"].includes(type) : type === kind);
 }
 
-export function ReceivedFiles({ files, onlineFiles, onDownload, onPreview, onDelete, onClearRoom }: ReceivedFilesProps) {
+export function ReceivedFiles({ files, onlineFiles, onDownload, onPreview, onDelete, onClearRoom, previewFirst = false }: ReceivedFilesProps) {
     const [downloading, setDownloading] = useState<Set<string>>(() => new Set());
     const [previewing, setPreviewing] = useState<string | null>(null);
     const [downloadErrors, setDownloadErrors] = useState<Record<string, string>>({});
@@ -52,7 +53,7 @@ export function ReceivedFiles({ files, onlineFiles, onDownload, onPreview, onDel
     };
     const selectTab = (next: "received" | "peer") => { setTab(next); setPage(0); setQuery(""); setKind("all"); };
 
-    return <section className="received-files file-library glass-card" aria-label="Received and shared files">
+    return <section className={`received-files file-library glass-card${previewFirst ? " library-preview-first" : ""}`} aria-label="Received and shared files">
         <div className="library-header">
             <div className="library-heading"><span className="library-symbol" aria-hidden="true"><FolderDown size={20} /></span><div><h3>Files</h3><p>{entries.length} {entries.length === 1 ? "file" : "files"}{entries.length > 0 && <> <span>·</span> {formatBytes(totalSize)}</>}</p></div></div>
             {!online && files.length > 0 && <button type="button" className="library-clear" onClick={onClearRoom} aria-label="Clear stored files for this room" title="Clear saved copies in this room"><Trash2 size={15} /><span>Clear saved</span></button>}
@@ -78,6 +79,13 @@ export function ReceivedFiles({ files, onlineFiles, onDownload, onPreview, onDel
                     const Icon = fileIcons[type] || File;
                     const isDownloading = downloading.has(file.fileId);
                     const complete = file.status === "complete" && file.receivedChunks === file.totalChunks;
+                    const downloadAction = !online && <button type="button" className="library-action library-download" disabled={isDownloading || !complete} onClick={() => void handleDownload(file)} aria-label={isDownloading ? `Downloading ${file.name}` : `Download ${file.name}`} title="Download">{isDownloading ? <LoaderCircle size={17} className="download-spinner" /> : <Download size={17} />}<span className="library-download-label">{isDownloading ? "Saving…" : "Download"}</span></button>;
+                    const previewAction = isPreviewable(file.mimeType) && <button type="button" className="library-action library-preview" disabled={previewing === file.fileId || (!online && !complete)} onClick={async () => {
+                        setPreviewing(file.fileId);
+                        try { await onPreview(file); }
+                        catch (error) { setDownloadErrors(current => ({ ...current, [file.fileId]: `Preview failed: ${error instanceof Error ? error.message : "Please try again."}` })); }
+                        finally { setPreviewing(null); }
+                    }} aria-label={`Preview ${file.name}`} title={previewFirst ? "Open file" : "Preview"}>{previewing === file.fileId ? <LoaderCircle size={17} className="download-spinner" /> : <Eye size={17} />}<span className="library-preview-label">{previewFirst ? "Open" : "Preview"}</span></button>;
                     return <article key={`${online ? "peer" : "local"}:${file.fileId}`} className="file-item" aria-busy={isDownloading || previewing === file.fileId}>
                         <div className={`file-icon library-icon-${type}`} aria-hidden="true"><Icon size={21} /></div>
                         <div className="file-info">
@@ -87,13 +95,7 @@ export function ReceivedFiles({ files, onlineFiles, onDownload, onPreview, onDel
                             <span className={`file-storage-badge ${online ? "storage-peer" : complete ? "storage-complete" : "storage-partial"}`}>{online ? "On peer · not saved here" : complete ? <><Check size={12} />Saved here</> : "Partially received"}</span>
                         </div>
                         <div className="file-actions">
-                            {!online && <button type="button" className="library-action library-download" disabled={isDownloading || !complete} onClick={() => void handleDownload(file)} aria-label={isDownloading ? `Downloading ${file.name}` : `Download ${file.name}`} title="Download">{isDownloading ? <LoaderCircle size={17} className="download-spinner" /> : <Download size={17} />}<span className="library-download-label">{isDownloading ? "Saving…" : "Download"}</span></button>}
-                            {isPreviewable(file.mimeType) && <button type="button" className="library-action library-preview" disabled={previewing === file.fileId || (!online && !complete)} onClick={async () => {
-                                setPreviewing(file.fileId);
-                                try { await onPreview(file); }
-                                catch (error) { setDownloadErrors(current => ({ ...current, [file.fileId]: `Preview failed: ${error instanceof Error ? error.message : "Please try again."}` })); }
-                                finally { setPreviewing(null); }
-                            }} aria-label={`Preview ${file.name}`} title="Preview">{previewing === file.fileId ? <LoaderCircle size={17} className="download-spinner" /> : <Eye size={17} />}<span className="library-preview-label">Preview</span></button>}
+                            {previewFirst ? <>{previewAction}{downloadAction}</> : <>{downloadAction}{previewAction}</>}
                             {!online && <button type="button" className="library-action library-delete" onClick={() => onDelete(file)} aria-label={`Delete ${file.name}`} title="Delete saved copy"><Trash2 size={16} /></button>}
                         </div>
                         {downloadErrors[file.fileId] && <p className="download-error" role="alert">{downloadErrors[file.fileId]}</p>}
