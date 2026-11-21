@@ -3,22 +3,23 @@ export type AvatarDef = {
     name: string;
     color: string;
     bgColor: string;
-    emoji: string;
+    character: "spark" | "planet" | "rabbit" | "flower" | "ghost" | "robot" | "flame" | "headphones" | "cat" | "cloud" | "sprout" | "sun";
+    description: string;
 };
 
 export const AVATARS: AvatarDef[] = [
-    { id: "blob-coral",  name: "Nova",     color: "#FF6B6B", bgColor: "#FF6B6B22", emoji: "👾" },
-    { id: "blob-mint",   name: "Orbit",    color: "#51CF66", bgColor: "#51CF6622", emoji: "👽" },
-    { id: "blob-sky",    name: "Echo",     color: "#339AF0", bgColor: "#339AF022", emoji: "💀" },
-    { id: "blob-violet", name: "Vortex",   color: "#CC5DE8", bgColor: "#CC5DE822", emoji: "👿" },
-    { id: "blob-amber",  name: "Phantom",  color: "#FF922B", bgColor: "#FF922B22", emoji: "👻" },
-    { id: "blob-cyan",   name: "Cipher",   color: "#22B8CF", bgColor: "#22B8CF22", emoji: "🤖" },
-    { id: "blob-rose",   name: "Blaze",    color: "#F06595", bgColor: "#F0659522", emoji: "👹" },
-    { id: "blob-lime",   name: "Pulse",    color: "#94D82D", bgColor: "#94D82D22", emoji: "💩" },
-    { id: "blob-indigo", name: "Nebula",   color: "#5C7CFA", bgColor: "#5C7CFA22", emoji: "🐹" },
-    { id: "blob-peach",  name: "Halo",     color: "#FFA8A8", bgColor: "#FFA8A822", emoji: "🐼" },
-    { id: "blob-teal",   name: "Zenith",   color: "#20C997", bgColor: "#20C99722", emoji: "🦁" },
-    { id: "blob-gold",   name: "Solstice", color: "#FAB005", bgColor: "#FAB00522", emoji: "🐯" },
+    { id: "blob-coral",  name: "Nova",     color: "#f58e7e", bgColor: "#342823", character: "spark", description: "A little spark. A lot of energy." },
+    { id: "blob-mint",   name: "Orbit",    color: "#afd8ad", bgColor: "#25332b", character: "planet", description: "Always in your corner of the universe." },
+    { id: "blob-sky",    name: "Echo",     color: "#9bc9ed", bgColor: "#24313b", character: "rabbit", description: "All ears. Ready for a good conversation." },
+    { id: "blob-violet", name: "Vortex",   color: "#bfa7e8", bgColor: "#302b3a", character: "flower", description: "A happy little twist on the everyday." },
+    { id: "blob-amber",  name: "Phantom",  color: "#e9ddba", bgColor: "#333126", character: "ghost", description: "Quietly here. Occasionally mischievous." },
+    { id: "blob-cyan",   name: "Cipher",   color: "#9ad8d8", bgColor: "#223536", character: "robot", description: "Your friendly neighbourhood file enthusiast." },
+    { id: "blob-rose",   name: "Blaze",    color: "#ed9aac", bgColor: "#38282f", character: "flame", description: "Warm heart. Full send." },
+    { id: "blob-lime",   name: "Pulse",    color: "#c4f55a", bgColor: "#2a3520", character: "headphones", description: "Good files. Better playlists." },
+    { id: "blob-indigo", name: "Nebula",   color: "#a6b2e9", bgColor: "#292e40", character: "cat", description: "Curious by nature. A night owl at heart." },
+    { id: "blob-peach",  name: "Halo",     color: "#edbda1", bgColor: "#382d26", character: "cloud", description: "Taking the scenic route through the day." },
+    { id: "blob-teal",   name: "Zenith",   color: "#89cbb0", bgColor: "#23372e", character: "sprout", description: "Small beginnings. Room to grow." },
+    { id: "blob-gold",   name: "Solstice", color: "#e9cc7d", bgColor: "#373322", character: "sun", description: "A pocket-sized dose of sunshine." },
 ];
 
 export function getAvatarById(id: string): AvatarDef {

@@ -1,4 +1,7 @@
 import { getAvatarById } from "./avatars";
+import type { CSSProperties } from "react";
+import { AvatarCharacter } from "./AvatarCharacter";
+import "./avatar.css";
 
 export type AvatarSize = "xs" | "sm" | "md" | "lg" | "xl";
 
@@ -14,14 +17,14 @@ export function Avatar({ avatarId, size = "md", className = "" }: AvatarProps) {
 
     return (
         <div
-            className={`avatar-blob ${sizeClass} ${className}`}
-            style={{
-                backgroundColor: `color-mix(in srgb, ${avatar.color} 12%, white)`,
-                color: `color-mix(in srgb, ${avatar.color} 35%, #1b2638)`,
-            }}
+            className={`avatar-blob character-avatar ${sizeClass} ${className}`}
+            style={{ "--avatar-color": avatar.color, "--avatar-bg": avatar.bgColor } as CSSProperties}
             title={avatar.name}
+            role="img"
+            aria-label={`${avatar.name} avatar`}
+            data-avatar-id={avatar.id}
         >
-            <span aria-hidden="true">{avatar.name.slice(0, 1)}</span>
+            <AvatarCharacter avatar={avatar} />
         </div>
     );
 }

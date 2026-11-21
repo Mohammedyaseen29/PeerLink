@@ -1,0 +1,78 @@
+.character-avatar.avatar-blob {
+    display: inline-grid;
+    place-items: center;
+    position: relative;
+    isolation: isolate;
+    flex: none;
+    overflow: hidden;
+    background: var(--avatar-bg);
+    border: 1px solid color-mix(in srgb, var(--avatar-color) 20%, transparent);
+    border-radius: 36%;
+    vertical-align: middle;
+}
+.character-avatar .avatar-art { display: block; width: 100%; height: 100%; overflow: visible; }
+.character-avatar.avatar-blob-xs { width: 28px; height: 28px; }
+.character-avatar.avatar-blob-sm { width: 34px; height: 34px; }
+.character-avatar.avatar-blob-md { width: 48px; height: 48px; }
+.character-avatar.avatar-blob-lg { width: 80px; height: 80px; }
+.character-avatar.avatar-blob-xl { width: 104px; height: 104px; }
+
+.settings-modal.peer-settings { display: flex; flex-direction: column; width: min(520px, 100%); overflow: hidden; }
+.peer-settings .settings-modal-header, .peer-settings .settings-modal-footer { flex: none; }
+.peer-settings .settings-modal-content { min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding-block: 20px; scrollbar-width: thin; scrollbar-color: #56634a transparent; }
+.peer-settings .settings-modal-footer { padding-top: 18px; border-top: 1px solid #34402e; }
+.peer-settings .settings-avatar-section { align-items: stretch; padding: 0; gap: 20px; background: transparent; border-radius: 0; }
+.peer-settings .character-preview { display: flex; align-items: center; gap: 20px; min-width: 0; padding: 16px 18px; background: #121713; border: 1px solid #343e33; border-radius: 16px; }
+.character-preview-stage { position: relative; display: grid; place-items: center; width: 112px; height: 118px; flex: none; }
+.character-preview-stage::after { content: ""; position: absolute; bottom: 0; width: 60px; height: 7px; border-radius: 50%; background: #0004; }
+.character-preview-stage .character-avatar { overflow: visible; background: transparent; border-color: transparent; animation: character-arrive 420ms cubic-bezier(.2, .9, .3, 1.2) both; }
+.character-preview-orbit { position: absolute; width: 111px; height: 111px; border: 1px dashed #9fac8b2c; border-radius: 50%; transform: rotate(-18deg); }
+.character-preview-orbit::before, .character-preview-orbit::after { content: ""; position: absolute; width: 5px; height: 5px; border-radius: 50%; background: #96a883; }
+.character-preview-orbit::before { top: 16px; left: 10px; }
+.character-preview-orbit::after { bottom: 14px; right: 11px; background: #c4f55a; }
+.character-preview-copy { min-width: 0; }
+.character-preview-eyebrow { display: block; margin-bottom: 3px; color: #9daa94; font-size: .75rem; }
+.character-preview-copy strong { color: #edf3e7; font-size: 1.5rem; font-weight: 550; letter-spacing: -.04em; }
+.character-preview-copy p { margin: 5px 0 0; max-width: 230px; color: #a7b49d; font-size: .875rem; line-height: 1.6; }
+.character-preview .avatar-eyes { transform-box: fill-box; transform-origin: center; animation: character-blink 5.8s 1s infinite; }
+.character-picker-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 12px; }
+.character-picker-heading > p { margin: 0; font-size: .875rem; color: #dce6d4; font-weight: 500; }
+.character-shuffle { display: inline-flex; align-items: center; justify-content: center; gap: 7px; min-height: 36px; padding: 6px 9px; color: #bfd79f; font-size: .75rem; border: 1px solid #3f4d35; border-radius: 8px; background: #222c1e; }
+.character-shuffle:hover { border-color: #8ea669; color: #d6f2af; background: #2b3824; }
+.character-shuffle:hover svg { transform: rotate(-12deg); }
+.peer-settings .avatar-picker-grid { grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; }
+.peer-settings .avatar-picker-item { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 5px; min-width: 0; min-height: 88px; padding: 9px 4px 7px; border: 1px solid #343e32; border-radius: 12px; background: #20271f; color: #a9b69f; }
+.peer-settings .avatar-picker-item .character-avatar { background: transparent; border-color: transparent; transition: transform 220ms cubic-bezier(.2,.8,.2,1); }
+.peer-settings .avatar-picker-item:hover { background: #293226; border-color: #66745a; color: #e2edd8; transform: translateY(-2px); }
+.peer-settings .avatar-picker-item:hover .character-avatar { transform: rotate(-7deg) scale(1.08); }
+.peer-settings .avatar-picker-item.selected { background: #c4f55a0a; border-color: #a9cf57; box-shadow: inset 0 0 0 1px #c4f55a14; color: #d4eca8; }
+.peer-settings .avatar-picker-item.selected .character-avatar { transform: rotate(4deg); }
+.character-option-name { font-size: .75rem; line-height: 1.5; }
+.peer-settings .avatar-picker-check { top: 6px; right: 6px; bottom: auto; width: 16px; height: 16px; }
+.room-chat-peer-avatar.has-character { padding: 0; background: transparent; border: 0; }
+.room-chat-peer-avatar .character-avatar { width: 28px; height: 28px; }
+@keyframes character-arrive { from { opacity: 0; transform: translateY(8px) rotate(-12deg) scale(.8); } to { opacity: 1; transform: translateY(0) rotate(0) scale(1); } }
+@keyframes character-blink { 0%, 43%, 48%, 100% { transform: scaleY(1); } 45%, 46% { transform: scaleY(.08); } }
+@media (max-width: 500px) {
+    .settings-modal-overlay { padding: 12px; }
+    .settings-modal.peer-settings { padding: 20px; max-height: calc(100dvh - 24px); }
+    .peer-settings .character-preview { gap: 14px; padding: 14px 12px; }
+    .character-preview-stage { width: 92px; height: 100px; }
+    .character-preview-stage .character-avatar { width: 88px; height: 88px; }
+    .character-preview-orbit { width: 92px; height: 92px; }
+    .character-preview-copy strong { font-size: 1.375rem; }
+    .character-preview-copy p { font-size: .8125rem; }
+    .character-shuffle { min-height: 44px; }
+    .peer-settings .settings-modal-close { width: 44px; height: 44px; }
+}
+@media (max-width: 380px) {
+    .peer-settings .avatar-picker-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+    .peer-settings .character-preview { gap: 10px; padding: 12px 10px; }
+    .character-picker-heading { gap: 8px; }
+    .character-picker-heading > p { font-size: .8125rem; }
+}
+@media (prefers-reduced-motion: reduce) {
+    .character-preview-stage .character-avatar, .character-preview .avatar-eyes { animation: none; }
+    .peer-settings .avatar-picker-item, .peer-settings .avatar-picker-item .character-avatar { transition: none; }
+    .peer-settings .avatar-picker-item:hover { transform: none; }
+}

@@ -417,7 +417,7 @@ function App() {
         <span className="toast-message-text">{toast.message}</span><button type="button" className="toast-dismiss" onClick={dismissToast} aria-label="Dismiss notification"><X size={16} /></button>
       </div></div>}
       {previewFile && <FilePreviewModal file={previewFile} previewUrl={previewUrl} onClose={handleClosePreview} />}
-      <ChatPanel isOpen={isChatOpen} onClose={() => setIsChatOpen(false)} messages={chatMessages} selfPeerId={selfPeerId} username={username} avatar={settings.avatar} onSendMessage={sendChatMessage} connected={connected} roomId={inRoom ? roomId : ""} />
+      <ChatPanel isOpen={isChatOpen} onClose={() => setIsChatOpen(false)} messages={chatMessages} selfPeerId={selfPeerId} username={username} avatar={settings.avatar} onSendMessage={sendChatMessage} connected={connected} roomId={inRoom ? roomId : ""} members={members} />
       <SettingsModal isOpen={isSettingsOpen} onClose={() => setIsSettingsOpen(false)} settings={settings} username={username} avatar={settings.avatar} onUpdateSettings={updateSettings} />
     </div>
   );

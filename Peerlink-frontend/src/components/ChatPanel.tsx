@@ -1,7 +1,7 @@
 import { Fragment, useEffect, useId, useLayoutEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { ArrowDown, ArrowUp, Check, CheckCheck, MessageCircle, X } from "lucide-react";
-import type { ChatMessage } from "../types";
+import type { ChatMessage, PeerMember } from "../types";
 import { Avatar } from "./Avatar";
 import "./chat.css";
 
@@ -15,6 +15,7 @@ interface ChatPanelProps {
     onSendMessage: (content: string) => void;
     connected?: boolean;
     roomId?: string;
+    members?: Pick<PeerMember, "peerId" | "avatar">[];
 }
 
 const messageTime = new Intl.DateTimeFormat(undefined, { hour: "2-digit", minute: "2-digit", hourCycle: "h23" });
@@ -54,6 +55,7 @@ export function ChatPanel({
     onSendMessage,
     connected = false,
     roomId = "",
+    members = [],
 }: ChatPanelProps) {
     const [present, setPresent] = useState(isOpen);
     const [inputValue, setInputValue] = useState("");
@@ -211,6 +213,7 @@ export function ChatPanel({
                             </div>
                         ) : messages.map((message, index) => {
                             const own = message.senderId === selfPeerId;
+                            const peerAvatar = members.find(member => member.peerId === message.senderId)?.avatar;
                             const previous = messages[index - 1];
                             const next = messages[index + 1];
                             const groupedBefore = groupedWith(message, previous);
@@ -227,7 +230,7 @@ export function ChatPanel({
                                 <Fragment key={message.id}>
                                     {newDay && <div className="room-chat-date"><span>{dayLabel(message.timestamp)}</span></div>}
                                     <div className={`room-chat-message ${own ? "is-own" : "is-peer"} ${groupedBefore ? "is-grouped-before" : ""} ${groupedAfter ? "is-grouped-after" : ""}`}>
-                                        {!own && <span className={`room-chat-peer-avatar ${groupedAfter ? "is-spacer" : ""}`} aria-hidden="true">{initials(message.senderName || "Peer")}</span>}
+                                        {!own && <span className={`room-chat-peer-avatar ${peerAvatar ? "has-character" : ""} ${groupedAfter ? "is-spacer" : ""}`} aria-hidden="true">{peerAvatar ? <Avatar avatarId={peerAvatar} size="xs" /> : initials(message.senderName || "Peer")}</span>}
                                         <div className="room-chat-message-body">
                                             {!own && !groupedBefore && <span className="room-chat-sender">{message.senderName || "Your peer"}</span>}
                                             <div className="room-chat-bubble">
