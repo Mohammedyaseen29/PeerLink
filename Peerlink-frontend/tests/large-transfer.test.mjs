@@ -113,6 +113,29 @@ test('local preview handles >4GiB and 50GB/50GiB ranges, suffix, EOF and malform
     }
 });
 
+test('local HEAD ignores Range while large suffix GET returns all tail bytes in bounded reads', async () => {
+    const f = localFixture();
+    for (const range of ['bytes=-1', 'bytes=999999999-', 'invalid']) {
+        const response = await f.request({ Range: range }, 'HEAD');
+        assert.equal(response.status, 200); assert.equal(response.headers.has('Content-Range'), false);
+        assert.equal(Number(response.headers.get('Content-Length')), 3 * MIB + 7);
+        assert.equal((await response.arrayBuffer()).byteLength, 0);
+    }
+    assert.equal(f.ranges.length, 0);
+    for (const length of [128, MIB + 31, 4 * MIB]) {
+        const response = await f.request({ Range: `bytes=-${length}` });
+        const start = Math.max(0, 3 * MIB + 7 - length);
+        assert.equal(response.status, 206);
+        assert.deepEqual(new Uint8Array(await response.arrayBuffer()), bytes(start, 3 * MIB + 7 - start));
+    }
+    assert.equal(f.ranges.every(range => range.end - range.start + 1 <= MIB), true);
+    await Promise.all(f.lifetimes);
+    const empty = localFixture(0);
+    const response = await empty.request({ Range: 'bytes=-1' });
+    assert.equal(response.status, 200); assert.equal(response.headers.get('Content-Length'), '0');
+    assert.equal((await response.arrayBuffer()).byteLength, 0); assert.equal(empty.ranges.length, 0);
+});
+
 test('local text previews cap bytes, force plain text, and reject giant image/PDF decoding', async () => {
     const response = await localFixture(50_000_000_000, 'text/html').request();
     assert.equal((await response.arrayBuffer()).byteLength, 256 * 1024);
@@ -177,6 +200,16 @@ test('packed downloads and local URLs require actual v2 ACK even without a waiti
     old.send('PEERLINK_DOWNLOAD_FINISHED');
     await download;
     assert.equal(old.frame.removed, true);
+});
+
+test('remote preview needs v3 while a v2 controlling worker still permits packed download/local preview', async () => {
+    const older = downloadFixture(2);
+    await assert.rejects(older.api.requireRemotePreviewCapability(), /Apply the PeerLink update/);
+    assert.match(await older.api.localPreviewUrl('id'), /__peerlink_local_preview/);
+    const download = older.api.downloadWithServiceWorker('id', 'file', 100, 'extent-v1');
+    await flush(); older.send('PEERLINK_DOWNLOAD_FINISHED'); await download;
+    const current = downloadFixture(3);
+    await current.api.requireRemotePreviewCapability();
 });
 
 test('healthy progress continues beyond 30 minutes, duplicate/untrusted progress cannot extend idle watchdog, and cleanup is final', async () => {

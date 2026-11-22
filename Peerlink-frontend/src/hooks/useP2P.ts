@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { clearRoom as clearRoomDB, clearTemporaryFiles, deleteFile as deleteStoredFile, getFilesInRoom, getUpdatePreviewUrl, readFileRange, streamFileToDownload, type FileMetadata } from '../ProgressDB';
-import { activeWorkerSupportsDownload } from '../download/serviceWorkerDownload';
+import { requireRemotePreviewCapability } from '../download/serviceWorkerDownload';
 import { CHUNK_SIZE, TransferEngine } from '../transfer/TransferEngine';
 import type { QueuedFile, ConnectionType, ReceivingFile, ChatMessage, Settings, RoomType, PeerMember, SignalingStatus } from '../types';
 import { generateId, getFileMimeType } from '../utils/helpers';
@@ -1895,10 +1895,7 @@ export function useP2P() {
         }
         if (!remote) throw new Error('This file is no longer shared by the peer.');
         await waitForPreviewServiceWorker();
-        const controller = navigator.serviceWorker.controller;
-        if (!controller || !(await activeWorkerSupportsDownload(controller, 2))) {
-            throw new Error('Apply the PeerLink update, then retry the preview. Download the file to open it in another app.');
-        }
+        await requireRemotePreviewCapability();
         if (!onlineFilesRef.current.some(onlineFile => onlineFile.fileId === file.fileId)) {
             throw new Error('This file is no longer shared by the peer.');
         }

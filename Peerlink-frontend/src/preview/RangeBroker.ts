@@ -128,6 +128,13 @@ export class RangeBroker {
             settled: false,
         };
         this.pending.set(request.requestId, pending);
+        port.onmessage = (event: MessageEvent<unknown>) => {
+            const message = event.data;
+            if (!isRecord(message) || message.type !== 'peerlink_preview_cancel' || message.requestId !== request.requestId || pending.settled) return;
+            this.finish(pending);
+            pending.controller.abort(new DOMException('Preview request canceled', 'AbortError'));
+            try { port.close(); } catch { /* The requesting worker has already closed its port. */ }
+        };
         port.start();
         void this.provideRange(request, pending.controller.signal).then((response) => {
             if (pending.settled) return;
@@ -145,6 +152,7 @@ export class RangeBroker {
                 try { port.close(); } catch { /* Port already closed. */ }
             }
         }).catch((error: unknown) => {
+            if (pending.settled) return;
             const failure = error instanceof Error ? error : new Error(String(error));
             if (failure.name !== "AbortError") this.onError?.(failure.message);
             this.fail(pending, failure.message, true);

@@ -103,7 +103,7 @@ sw.addEventListener('message', (event) => {
   } else if (event.data && typeof event.data === 'object' && event.data.type === 'PEERLINK_DOWNLOAD_CAPABILITY') {
     const port = event.ports[0]
     if (!port) return
-    try { port.postMessage({ type: 'PEERLINK_DOWNLOAD_CAPABILITY_ACK', version: 2 }) }
+    try { port.postMessage({ type: 'PEERLINK_DOWNLOAD_CAPABILITY_ACK', version: 3 }) }
     finally { port.close() }
   }
 })
@@ -131,18 +131,32 @@ function decodeFileId(pathname: string): string | undefined {
   }
 }
 
-function parseRange(value: string | null): { start: number; end: number | null } | undefined {
-  if (!value) return undefined
+type PreviewByteRange = { kind: 'none' } | { kind: 'invalid' } | { kind: 'suffix'; length: number } | { kind: 'explicit'; start: number; end: number | null }
 
-  const match = /^bytes=(\d+)-(\d*)$/i.exec(value.trim())
-  if (!match) return undefined
-
+function parseRange(value: string | null): PreviewByteRange {
+  if (value === null) return { kind: 'none' }
+  const match = /^bytes=(\d*)-(\d*)$/i.exec(value.trim())
+  if (!match || (!match[1] && !match[2])) return { kind: 'invalid' }
+  if (!match[1]) {
+    const length = Number(match[2])
+    return Number.isSafeInteger(length) && length > 0 ? { kind: 'suffix', length } : { kind: 'invalid' }
+  }
   const start = Number(match[1])
   const end = match[2] ? Number(match[2]) : null
-  if (!Number.isSafeInteger(start) || (end !== null && !Number.isSafeInteger(end)) || (end !== null && end < start)) {
-    return undefined
-  }
-  return { start, end }
+  return Number.isSafeInteger(start) && start >= 0 && (end === null || (Number.isSafeInteger(end) && end >= start))
+    ? { kind: 'explicit', start, end } : { kind: 'invalid' }
+}
+
+function selectPreviewRange(range: PreviewByteRange, size: number): { start: number; end: number; status: 200 | 206 } | null {
+  if (range.kind === 'none') return { start: 0, end: size - 1, status: 200 }
+  if (size === 0 && range.kind === 'suffix') return { start: 0, end: -1, status: 200 }
+  if (range.kind === 'invalid' || size === 0) return null
+  if (range.kind === 'suffix') return { start: Math.max(0, size - range.length), end: size - 1, status: 206 }
+  return range.start < size ? { start: range.start, end: Math.min(range.end ?? size - 1, size - 1), status: 206 } : null
+}
+
+function previewSize(metadata: { size: number; mimeType: string }): number {
+  return metadata.mimeType.startsWith('text/') ? Math.min(metadata.size, MAX_TEXT_PREVIEW_BYTES) : metadata.size
 }
 
 function previewHeaders(mimeType?: string): Headers {
@@ -379,55 +393,36 @@ const downloadMatch = ({ request, url }: { request: Request; url: URL }) =>
 
 registerRoute(downloadMatch, ({ event, request, url }) => handleDownloadRequest(event as FetchEvent, request, url), 'GET')
 
-/** Completed local files are independent of the room and any page/peer broker. */
-async function handleLocalPreviewRequest(event: FetchEvent, request: Request, url: URL): Promise<Response> {
-  if (url.origin !== sw.location.origin) return emptyResponse(403)
-  const match = LOCAL_PREVIEW_PATH.exec(url.pathname)
-  if (!match || !['GET', 'HEAD'].includes(request.method)) return emptyResponse(405)
-  let fileId: string
-  try { fileId = decodeURIComponent(match[1]) } catch { return emptyResponse(400) }
-  if (!/^[A-Za-z0-9_-]{1,128}$/.test(fileId)) return emptyResponse(400)
-  const metadata = await getMetaData(fileId)
-  if (!metadata || !validDownloadMetadata(metadata, metadata.size)) return emptyResponse(404)
-  try { checkPreviewSize(metadata) } catch { return emptyResponse(413) }
-  const size = metadata.mimeType.startsWith('text/') ? Math.min(metadata.size, MAX_TEXT_PREVIEW_BYTES) : metadata.size
-  let start = 0
-  let end = size - 1
-  const rawRange = request.headers.get('Range')
-  if (rawRange !== null) {
-    const range = /^bytes=(\d*)-(\d*)$/i.exec(rawRange.trim())
-    if (!range || (!range[1] && !range[2])) return emptyResponse(416, `bytes */${size}`, metadata.mimeType)
-    if (!range[1]) {
-      const suffix = Number(range[2])
-      if (!Number.isSafeInteger(suffix) || suffix < 1) return emptyResponse(416, `bytes */${size}`, metadata.mimeType)
-      start = Math.max(0, size - suffix)
-    } else {
-      start = Number(range[1])
-      end = range[2] ? Number(range[2]) : size - 1
-      if (!Number.isSafeInteger(start) || !Number.isSafeInteger(end) || end < start) return emptyResponse(416, `bytes */${size}`, metadata.mimeType)
-      end = Math.min(end, size - 1)
-    }
-    if (start >= size || size === 0) return emptyResponse(416, `bytes */${size}`, metadata.mimeType)
-  }
+/** One bounded pull at a time; abort settles both a waiting read and an idle/backpressured body. */
+function streamPreviewResponse(
+  event: FetchEvent, request: Request, metadata: { size: number; mimeType: string },
+  selection: { start: number; end: number; status: 200 | 206 },
+  readRange: (start: number, end: number, signal: AbortSignal) => Promise<ArrayBuffer>,
+  initial?: { start: number; data: ArrayBuffer }
+): Response {
+  const { start, end, status } = selection
   const headers = previewHeaders(metadata.mimeType)
   headers.set('Content-Length', String(Math.max(0, end - start + 1)))
-  if (rawRange !== null) headers.set('Content-Range', `bytes ${start}-${end}/${size}`)
-  const status = rawRange !== null ? 206 : 200
-  if (request.method === 'HEAD' || size === 0) return new Response(null, { status, headers })
+  if (status === 206) headers.set('Content-Range', 'bytes ' + start + '-' + end + '/' + previewSize(metadata))
+  if (request.method === 'HEAD' || end < start) return new Response(null, { status, headers })
   let finishLifetime!: () => void
   event.waitUntil(new Promise<void>(resolve => { finishLifetime = resolve }))
+  const provider = new AbortController()
   let finished = false
   let cancelled = false
   let streamController: ReadableStreamDefaultController<Uint8Array> | undefined
+  let first = initial
   const finish = () => {
     if (finished) return
     finished = true
+    first = undefined
     request.signal.removeEventListener('abort', abort)
     finishLifetime()
   }
   const abort = () => {
     if (finished) return
     cancelled = true
+    provider.abort()
     streamController?.error(new DOMException('Preview canceled', 'AbortError'))
     finish()
   }
@@ -439,20 +434,47 @@ async function handleLocalPreviewRequest(event: FetchEvent, request: Request, ur
       if (request.signal.aborted) abort()
     },
     async pull(controller) {
+      if (cancelled) return
       try {
-        if (cancelled) throw new DOMException('Preview canceled', 'AbortError')
-        const nextEnd = Math.min(offset + MAX_RANGE_BYTES - 1, end)
-        const data = await readFileRange(fileId, metadata, offset, nextEnd)
+        const nextEnd = offset + Math.min(MAX_RANGE_BYTES - 1, end - offset)
+        const expected = nextEnd - offset + 1
+        const data = first?.start === offset && first.data.byteLength >= expected
+          ? (first.data.byteLength === expected ? first.data : first.data.slice(0, expected))
+          : await readRange(offset, nextEnd, provider.signal)
+        first = undefined
         if (cancelled) return
-        if (data.byteLength !== nextEnd - offset + 1) throw new Error('Local preview range is incomplete.')
+        if (data.byteLength !== expected) throw new Error('Preview range is incomplete.')
         offset += data.byteLength
         controller.enqueue(new Uint8Array(data))
         if (offset > end) { controller.close(); finish() }
-      } catch (error) { if (!cancelled) controller.error(error); finish() }
+      } catch (error) {
+        provider.abort()
+        if (!cancelled) controller.error(error)
+        finish()
+      }
     },
-    cancel() { cancelled = true; finish() }
+    cancel() { cancelled = true; provider.abort(); finish() }
   })
   return new Response(body, { status, headers })
+}
+
+/** Completed local files are independent of the room and any page/peer broker. */
+async function handleLocalPreviewRequest(event: FetchEvent, request: Request, url: URL): Promise<Response> {
+  if (url.origin !== sw.location.origin) return emptyResponse(403)
+  const match = LOCAL_PREVIEW_PATH.exec(url.pathname)
+  if (!match || !['GET', 'HEAD'].includes(request.method)) return emptyResponse(405)
+  let fileId: string
+  try { fileId = decodeURIComponent(match[1]) } catch { return emptyResponse(400) }
+  if (!/^[A-Za-z0-9_-]{1,128}$/.test(fileId)) return emptyResponse(400)
+  const metadata = await getMetaData(fileId)
+  if (!metadata || !validDownloadMetadata(metadata, metadata.size)) return emptyResponse(404)
+  try { checkPreviewSize(metadata) } catch { return emptyResponse(413) }
+  // Range only modifies GET. HEAD describes the complete preview representation.
+  const range = parseRange(request.method === 'HEAD' ? null : request.headers.get('Range'))
+  const selection = selectPreviewRange(range, previewSize(metadata))
+  if (!selection) return emptyResponse(416, 'bytes */' + previewSize(metadata), metadata.mimeType)
+  return streamPreviewResponse(event, request, metadata, selection,
+    (start, end) => readFileRange(fileId, metadata, start, end))
 }
 
 for (const method of ['GET', 'HEAD'] as const) {
@@ -471,25 +493,31 @@ function askPage(
     const channel = new MessageChannel()
     const port = channel.port1
     let settled = false
+    let sent = false
+    const id = requestId()
 
-    const finish = (callback: (value: never) => void, value: unknown) => {
+    const finish = (callback: (value: never) => void, value: unknown, cancel = false) => {
       if (settled) return
       settled = true
+      if (cancel && sent) {
+        try { port.postMessage({ type: 'peerlink_preview_cancel', requestId: id }) } catch { /* The page may already have closed its port. */ }
+      }
       sw.clearTimeout(timeout)
       signal.removeEventListener('abort', onAbort)
       port.onmessage = null
       port.onmessageerror = null
       port.close()
+      if (!sent) channel.port2.close()
       callback(value as never)
     }
 
-    const onAbort = () => finish(reject, new DOMException('Preview request aborted', 'AbortError'))
+    const onAbort = () => finish(reject, new DOMException('Preview request aborted', 'AbortError'), true)
     const timeout = sw.setTimeout(() => {
-      finish(reject, new BrokerFailure(504, 'Preview broker timed out'))
+      finish(reject, new BrokerFailure(504, 'Preview broker timed out'), true)
     }, BROKER_TIMEOUT_MS)
 
     port.onmessage = (event: MessageEvent<unknown>) => finish(resolve, event.data)
-    port.onmessageerror = () => finish(reject, new BrokerFailure(502, 'Invalid preview broker message'))
+    port.onmessageerror = () => finish(reject, new BrokerFailure(502, 'Invalid preview broker message'), true)
     port.start()
 
     if (signal.aborted) {
@@ -503,11 +531,12 @@ function askPage(
       fileId,
       start,
       end,
-      requestId: requestId()
+      requestId: id
     }
 
     try {
       client.postMessage(message, [channel.port2])
+      sent = true
     } catch {
       finish(reject, new BrokerFailure(503, 'Preview page is unavailable'))
     }
@@ -517,95 +546,32 @@ function askPage(
 async function handlePreviewRequest(event: FetchEvent, request: Request, url: URL): Promise<Response> {
   const fileId = decodeFileId(url.pathname)
   if (!fileId) return emptyResponse(400)
-
-  const range = parseRange(request.headers.get('Range'))
-  const start = range?.start ?? 0
-  const requestedEnd = range?.end ?? start + MAX_RANGE_BYTES - 1
-  const end = Math.min(
-    requestedEnd,
-    start + MAX_RANGE_BYTES - 1,
-    Number.MAX_SAFE_INTEGER
-  )
-
   if (!event.clientId) return emptyResponse(503)
-
+  // Suffix ranges need the representation length first. HEAD and malformed requests
+  // only probe one byte, rather than reading an unrelated full payload range.
+  const range = parseRange(request.method === 'HEAD' ? null : request.headers.get('Range'))
+  const probeStart = range.kind === 'explicit' ? range.start : 0
+  const probeEnd = request.method === 'HEAD' || range.kind === 'suffix' || range.kind === 'invalid'
+    ? probeStart
+    : range.kind === 'explicit'
+      ? Math.min(range.end ?? Number.MAX_SAFE_INTEGER, probeStart + Math.min(MAX_RANGE_BYTES - 1, Number.MAX_SAFE_INTEGER - probeStart))
+      : MAX_RANGE_BYTES - 1
   try {
     const client = await sw.clients.get(event.clientId)
     if (!client || client.type !== 'window') return emptyResponse(503)
-
-    const reply = await askPage(client as WindowClient, request.signal, fileId, start, end)
-    if (isRecord(reply) && Object.hasOwn(reply, 'error')) {
-      if (typeof reply.error === 'string' && reply.error.length > 0) return emptyResponse(503)
-      return emptyResponse(502)
-    }
-
-    const metadata = validateBrokerReply(reply, start, end)
+    const reply = await askPage(client as WindowClient, request.signal, fileId, probeStart, probeEnd)
+    if (isRecord(reply) && Object.hasOwn(reply, 'error')) return emptyResponse(typeof reply.error === 'string' && reply.error.length > 0 ? 503 : 502)
+    const metadata = validateBrokerReply(reply, probeStart, probeEnd)
     if (!metadata) return emptyResponse(502)
-    checkPreviewSize(metadata)
-    if (metadata.mimeType.startsWith('text/')) {
-      const size = Math.min(metadata.size, MAX_TEXT_PREVIEW_BYTES)
-      if (request.headers.has('Range') && (!range || start >= size)) return emptyResponse(416, `bytes */${size}`, metadata.mimeType)
-      const actualEnd = Math.min(end, size - 1)
-      const headers = previewHeaders(metadata.mimeType)
-      const data = metadata.data.slice(0, Math.max(0, actualEnd - start + 1))
-      headers.set('Content-Length', String(data.byteLength))
-      if (range) headers.set('Content-Range', `bytes ${start}-${actualEnd}/${size}`)
-      return new Response(request.method === 'HEAD' ? null : data, { status: range ? 206 : 200, headers })
-    }
-    if (!request.headers.has('Range')) {
-      const headers = previewHeaders(metadata.mimeType)
-      headers.set('Content-Length', String(metadata.size))
-      if (request.method === 'HEAD' || metadata.size === 0) return new Response(null, { status: 200, headers })
-
-      // Images and documents normally request the whole resource, not a Range.
-      // Stream bounded peer ranges instead of rejecting them or buffering the entire file.
-      const controller = new AbortController()
-      const onAbort = () => controller.abort()
-      request.signal.addEventListener('abort', onAbort, { once: true })
-      let finishLifetime!: () => void
-      event.waitUntil(new Promise<void>(resolve => { finishLifetime = resolve }))
-      let offset = 0
-      let first: ArrayBuffer | null = metadata.data
-      const finish = () => {
-        request.signal.removeEventListener('abort', onAbort)
-        finishLifetime()
-      }
-      const body = new ReadableStream<Uint8Array>({
-        async pull(stream) {
-          try {
-            if (request.signal.aborted || controller.signal.aborted) throw new DOMException('Preview canceled', 'AbortError')
-            const rangeEnd = Math.min(offset + MAX_RANGE_BYTES, metadata.size) - 1
-            const reply = first ? null : await askPage(client as WindowClient, controller.signal, fileId, offset, rangeEnd)
-            const next = first ? metadata : validateBrokerReply(reply, offset, rangeEnd)
-            if (!next || next.size !== metadata.size || next.mimeType !== metadata.mimeType) throw new Error('The peer preview changed or became unavailable.')
-            first = null
-            stream.enqueue(new Uint8Array(next.data))
-            offset += next.data.byteLength
-            if (offset >= metadata.size) { stream.close(); finish() }
-          } catch (error) {
-            controller.abort()
-            stream.error(error)
-            finish()
-          }
-        },
-        cancel() { controller.abort(); finish() }
-      })
-      return new Response(body, { status: 200, headers })
-    }
-    if (!range || start >= metadata.size) {
-      return emptyResponse(416, `bytes */${metadata.size}`, metadata.mimeType)
-    }
-
-    const actualEnd = Math.min(end, metadata.size - 1)
-    const contentLength = actualEnd - start + 1
-    const headers = previewHeaders(metadata.mimeType)
-    headers.set('Content-Length', String(contentLength))
-    headers.set('Content-Range', `bytes ${start}-${actualEnd}/${metadata.size}`)
-
-    return new Response(request.method === 'HEAD' ? null : metadata.data, {
-      status: 206,
-      headers
-    })
+    try { checkPreviewSize(metadata) } catch { return emptyResponse(413) }
+    const selection = selectPreviewRange(range, previewSize(metadata))
+    if (!selection) return emptyResponse(416, 'bytes */' + previewSize(metadata), metadata.mimeType)
+    return streamPreviewResponse(event, request, metadata, selection, async (start, end, signal) => {
+      const value = await askPage(client as WindowClient, signal, fileId, start, end)
+      const next = validateBrokerReply(value, start, end)
+      if (!next || next.size !== metadata.size || next.mimeType !== metadata.mimeType) throw new Error('The peer preview changed or became unavailable.')
+      return next.data
+    }, { start: probeStart, data: metadata.data })
   } catch (error) {
     if (error instanceof DOMException && error.name === 'AbortError') throw error
     if (error instanceof BrokerFailure) return emptyResponse(error.status)

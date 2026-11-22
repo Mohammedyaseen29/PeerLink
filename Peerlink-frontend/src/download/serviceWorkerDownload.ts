@@ -122,6 +122,14 @@ export async function localPreviewUrl(fileId: string): Promise<string> {
     return new URL(`/__peerlink_local_preview/${encodeURIComponent(fileId)}`, window.location.origin).href;
 }
 
+/** Remote range/seek cancellation needs the v3 worker; packed local storage remains v2-compatible. */
+export async function requireRemotePreviewCapability(): Promise<void> {
+    const worker = navigator.serviceWorker.controller;
+    if (!worker || !(await activeWorkerSupportsDownload(worker, 3))) {
+        throw new Error('Apply the PeerLink update, then retry the preview. Download the file to open it in another app.');
+    }
+}
+
 export async function downloadWithServiceWorker(fileId: string, name: string, size: number, storageFormat?: 'extent-v1'): Promise<void> {
     const worker = await controlledPeerLinkWorker(storageFormat === 'extent-v1' ? 2 : 1);
     // v1 is safe for legacy rows but cannot report progress; only v2 gets an idle watchdog.
