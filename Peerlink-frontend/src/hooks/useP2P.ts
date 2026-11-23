@@ -7,47 +7,22 @@ import { generateId, getFileMimeType } from '../utils/helpers';
 import { getRandomAvatar } from '../components/avatars';
 import { createRemotePreviewUrl, MAX_PREVIEW_RANGE_BYTES, RangeBroker, type PreviewRangeRequest, type PreviewRangeResponse, waitForPreviewServiceWorker } from '../preview/RangeBroker';
 import { getRecentDiagnostics, recordTransferDiagnostic } from '../transferDiagnostics';
+import { DEFAULT_ICE_SERVERS, parseIceServers, hasRelayServer, connectionFailureMessage, type FailedConnection } from '../connection/iceConfiguration';
 
 export { getRecentDiagnostics } from '../transferDiagnostics';
 
 const STORAGE_KEY = 'peerlink_settings';
-const DEFAULT_ICE_SERVERS: RTCIceServer[] = [
-    { urls: 'stun:stun.l.google.com:19302' },
-    { urls: [
-        'turn:openrelay.metered.ca:80',
-        'turn:openrelay.metered.ca:443?transport=udp',
-        'turn:openrelay.metered.ca:443?transport=tcp',
-    ], username: 'openrelayproject', credential: 'openrelayproject' },
-];
-function safeIceServers(): RTCIceServer[] {
+function safeIceOverride(): RTCIceServer[] | null {
     const raw = (import.meta.env as Record<string, unknown>).VITE_ICE_SERVERS;
-    if (typeof raw !== 'string' || !raw.trim()) return DEFAULT_ICE_SERVERS;
+    if (typeof raw !== 'string' || !raw.trim()) return null;
     try {
-        const parsed: unknown = JSON.parse(raw);
-        if (!Array.isArray(parsed) || parsed.length > 8) throw new Error('Expected an array with at most eight ICE servers.');
-        const servers: RTCIceServer[] = parsed.map((value, index) => {
-            if (!value || typeof value !== 'object') throw new Error(`ICE server ${index + 1} is invalid.`);
-            const candidate = value as Record<string, unknown>;
-            const urls = typeof candidate.urls === 'string' ? [candidate.urls] : candidate.urls;
-            if (!Array.isArray(urls) || urls.length < 1 || urls.length > 8 || urls.some(url => typeof url !== 'string' ||
-                url.length > 512 || !/^(stun|stuns|turn|turns):/i.test(url))) throw new Error(`ICE server ${index + 1} has invalid URLs.`);
-            if (candidate.username !== undefined && (typeof candidate.username !== 'string' || candidate.username.length > 512)) {
-                throw new Error(`ICE server ${index + 1} has an invalid username.`);
-            }
-            if (candidate.credential !== undefined && (typeof candidate.credential !== 'string' || candidate.credential.length > 2048)) {
-                throw new Error(`ICE server ${index + 1} has an invalid credential.`);
-            }
-            return { urls: urls as string[], ...(typeof candidate.username === 'string' ? { username: candidate.username } : {}),
-                ...(typeof candidate.credential === 'string' ? { credential: candidate.credential } : {}) };
-        });
-        if (!servers.length) throw new Error('At least one ICE server is required.');
-        return servers;
+        return parseIceServers(JSON.parse(raw));
     } catch {
         recordTransferDiagnostic('ice_server_override', 'invalid_override_fallback');
-        return DEFAULT_ICE_SERVERS;
+        return null;
     }
 }
-const ICE_SERVERS = safeIceServers();
+const ICE_SERVER_OVERRIDE = safeIceOverride();
 const CATALOG_FILES_PER_MESSAGE = 16;
 const MAX_CATALOG_FILES = 10_000;
 const MAX_CATALOG_MESSAGES = 10_000;
@@ -197,6 +172,9 @@ type PeerSession = {
     candidates: RTCIceCandidateInit[];
     remoteCandidateChain: Promise<void>;
     pendingRemoteCandidateCount: number;
+    localCandidateTypes: Record<string, number>;
+    remoteCandidateTypes: Record<string, number>;
+    relayConfigured: boolean;
     status: PeerMember['status'];
     connectionType: ConnectionType;
     initialNegotiationTimer?: number;
@@ -212,7 +190,7 @@ type PeerSession = {
     pendingHostRanges: Map<string, AbortController>;
     previewSendChain: Promise<void>;
     receiveClock: { id: string; start: number; update: number };
-    dispose?: (retry?: boolean) => void;
+    dispose?: (retry?: boolean, reason?: string) => void;
 };
 
 function sendControlMessage(session: PeerSession, value: object): void {
@@ -250,6 +228,11 @@ function iceServerHostnames(servers: RTCIceServer[]): string[] {
             return match ? [match[1].slice(0, 255)] : [];
         });
     }))].slice(0, 16);
+}
+
+function iceCandidateType(candidate: RTCIceCandidateInit): string | null {
+    const type = /(?:^|\s)typ (host|srflx|prflx|relay)(?:\s|$)/.exec(candidate.candidate || '')?.[1];
+    return type || null;
 }
 
 function safeCatalogEntry(value: unknown): FileMetadata | null {
@@ -372,6 +355,9 @@ export function useP2P() {
     const [inRoom, setInRoom] = useState(false);
     const [hasPeer, setHasPeer] = useState(false);
     const [signalingStatus, setSignalingStatus] = useState<SignalingStatus>('idle');
+    const [connectionNotice, setConnectionNotice] = useState<string | null>(null);
+    const iceServersRef = useRef(ICE_SERVER_OVERRIDE ?? DEFAULT_ICE_SERVERS);
+    const lastConnectionFailure = useRef<FailedConnection | null>(null);
     const [connectionFormKey, setConnectionFormKey] = useState(0);
     const [sendQueue, setSendQueue] = useState<QueuedFile[]>([]);
     const [receivedFiles, setReceivedFiles] = useState<FileMetadata[]>([]);
@@ -956,6 +942,7 @@ export function useP2P() {
         const session: PeerSession = { ...member, supportsReconnect: member.supportsReconnect === true, linkId,
             generation: crypto.randomUUID(), pc: null, engine: null, control: null, data: null, preview: null,
             candidates: [], remoteCandidateChain: Promise.resolve(), pendingRemoteCandidateCount: 0,
+            localCandidateTypes: {}, remoteCandidateTypes: {}, relayConfigured: hasRelayServer(iceServersRef.current),
             status: 'connecting', connectionType: 'disconnected', outgoingCatalogRevision: 0, incomingCatalogRevision: 0,
             catalogSendChain: Promise.resolve(),
             incomingCatalog: null, sharedSources: new Map(), lastCatalogFingerprint: '', aliasesByRemoteId: new Map(), remoteFilesByAlias: new Map(),
@@ -965,10 +952,11 @@ export function useP2P() {
         setMembers(current => current.some(item => item.peerId === member.peerId)
             ? current.map(item => item.peerId === member.peerId ? { ...item, ...member, connectionType: 'disconnected', status: 'connecting' } : item)
             : [...current, { ...member, connectionType: 'disconnected', status: 'connecting' }]);
-        const peer = new RTCPeerConnection({ iceServers: ICE_SERVERS }); session.pc = peer;
+        const peer = new RTCPeerConnection({ iceServers: iceServersRef.current }); session.pc = peer;
         recordTransferDiagnostic('peer_connection_created', undefined, {
-            serverCount: ICE_SERVERS.length,
-            serverHostnames: iceServerHostnames(ICE_SERVERS).join(', ').slice(0, 512),
+            serverCount: iceServersRef.current.length,
+            serverHostnames: iceServerHostnames(iceServersRef.current).join(', ').slice(0, 512),
+            relayConfigured: session.relayConfigured,
             maxMessageSize: peer.sctp?.maxMessageSize ?? null,
             connectionState: peer.connectionState, iceConnectionState: peer.iceConnectionState,
             iceGatheringState: peer.iceGatheringState,
@@ -981,6 +969,17 @@ export function useP2P() {
         previews.binaryType = 'arraybuffer'; previews.bufferedAmountLowThreshold = PREVIEW_BUFFER_HIGH_WATER / 2;
         const closeSession = (retry = true, reason = 'transport_closed') => {
             if (sessions.current.get(session.peerId) !== session) return;
+            if (retry) {
+                const failure: FailedConnection = { reason, connectionState: peer.connectionState,
+                    iceConnectionState: peer.iceConnectionState, iceGatheringState: peer.iceGatheringState,
+                    signalingState: peer.signalingState, relayConfigured: session.relayConfigured,
+                    localCandidates: { ...session.localCandidateTypes }, remoteCandidates: { ...session.remoteCandidateTypes } };
+                lastConnectionFailure.current = failure;
+                setConnectionNotice(connectionFailureMessage(failure));
+                recordTransferDiagnostic('connection_failure', reason, { signalingState: failure.signalingState,
+                    relayConfigured: failure.relayConfigured, localRelayCandidates: failure.localCandidates.relay || 0,
+                    remoteRelayCandidates: failure.remoteCandidates.relay || 0 });
+            }
             if (session.initialNegotiationTimer !== undefined) {
                 window.clearTimeout(session.initialNegotiationTimer);
                 session.initialNegotiationTimer = undefined;
@@ -1019,7 +1018,7 @@ export function useP2P() {
             }
             if (retry) onTransportLost?.(session);
         };
-        session.dispose = (retry = true) => closeSession(retry);
+        session.dispose = (retry = true, reason = 'transport_closed') => closeSession(retry, reason);
         if (!linkId) {
             session.initialNegotiationTimer = window.setTimeout(() => {
                 session.initialNegotiationTimer = undefined;
@@ -1087,6 +1086,7 @@ export function useP2P() {
         const opened = () => {
             if (sessions.current.get(session.peerId) !== session || commands.readyState !== 'open' || chunks.readyState !== 'open') return;
             recordTransferDiagnostic('data_channels_open', undefined, { control: commands.readyState, data: chunks.readyState });
+            lastConnectionFailure.current = null; setConnectionNotice(null);
             if (session.initialNegotiationTimer !== undefined) {
                 window.clearTimeout(session.initialNegotiationTimer);
                 session.initialNegotiationTimer = undefined;
@@ -1202,11 +1202,15 @@ export function useP2P() {
         const sessionRoom = currentRoom.current;
         const sessionGeneration = session.generation;
         peer.onicecandidate = ({ candidate }) => {
-            if (!candidate || !sessionSocket || sessionSocket !== ws.current || sessionSocket.readyState !== WebSocket.OPEN ||
+            if (!sessionSocket || sessionSocket !== ws.current || sessionSocket.readyState !== WebSocket.OPEN ||
                 sessions.current.get(session.peerId) !== session || session.pc !== peer || session.generation !== sessionGeneration ||
                 currentRoom.current !== sessionRoom) return;
+            if (candidate) {
+                const type = iceCandidateType(candidate);
+                if (type) session.localCandidateTypes[type] = (session.localCandidateTypes[type] || 0) + 1;
+            }
             sessionSocket.send(JSON.stringify({ type: 'ice_candidate', roomId: sessionRoom,
-                targetPeerId: session.peerId, ...(session.linkId ? { linkId: session.linkId } : {}), payload: candidate }));
+                targetPeerId: session.peerId, ...(session.linkId ? { linkId: session.linkId } : {}), payload: candidate ?? { candidate: '' } }));
         };
         return session;
     };
@@ -1216,6 +1220,8 @@ export function useP2P() {
         if (!room || ws.current) return;
         const rtcAvailable = typeof RTCPeerConnection === 'function';
         const joinGeneration = ++roomJoinGeneration.current;
+        lastConnectionFailure.current = null; setConnectionNotice(null);
+        iceServersRef.current = ICE_SERVER_OVERRIDE ?? DEFAULT_ICE_SERVERS;
         currentRoom.current = room; temporary.current = newRoomType === 'temporary';
         setRoomId(room); setRoomType(newRoomType); setInRoom(true); setHasPeer(false); setSignalingStatus(rtcAvailable ? 'connecting' : 'unsupported');
         setSelfPeerId(''); selfPeerIdRef.current = ''; setMembers([]); setSelectedPeerIds([]); updateCurrentReceivings(() => []);
@@ -1328,7 +1334,12 @@ export function useP2P() {
                     session.generation !== generation || session.pc !== peer || !peer.remoteDescription) return;
                 try {
                     await peer.addIceCandidate(candidate);
-                } catch {
+                    const type = iceCandidateType(candidate);
+                    if (type) session.remoteCandidateTypes[type] = (session.remoteCandidateTypes[type] || 0) + 1;
+                } catch (error) {
+                    recordTransferDiagnostic('remote_ice_candidate', error instanceof Error ? error.name : 'rejected', {
+                        candidateType: iceCandidateType(candidate), signalingState: peer.signalingState,
+                    });
                     // A single stale or unusable ICE candidate must not abort the SDP handshake.
                 }
             }).catch(() => undefined).finally(() => {
@@ -1418,7 +1429,7 @@ export function useP2P() {
                         state.timeout = undefined;
                         if (sessions.current.get(peerId) === session && session.status !== 'connected') {
                             state.inFlight = false;
-                            session.dispose?.(true);
+                            session.dispose?.(true, 'reconnect_channel_timeout');
                         }
                     }, NEGOTIATION_TIMEOUT_MS);
                 } catch {
@@ -1590,6 +1601,14 @@ export function useP2P() {
                 }
                 if (msg.type === 'joined') {
                     if (msg.protocolVersion !== 2 || typeof msg.peerId !== 'string' || !Array.isArray(msg.peers)) { failSignaling('The signaling server returned an incompatible room response.'); return; }
+                    // Resolve deployment credentials before creating any peer connection.
+                    // Keep a working build-time override for existing installations.
+                    if (!ICE_SERVER_OVERRIDE && msg.iceServers !== undefined) {
+                        try { iceServersRef.current = parseIceServers(msg.iceServers); }
+                        catch { recordTransferDiagnostic('ice_configuration', 'invalid_server_config'); }
+                    }
+                    recordTransferDiagnostic('ice_configuration', msg.configurationError === true ? 'invalid_deployment_config'
+                        : hasRelayServer(iceServersRef.current) ? 'relay_configured' : 'relay_not_configured');
                     const firstJoin = !joinedRoom;
                     joinedRoom = true; selfPeerIdRef.current = msg.peerId; setSelfPeerId(msg.peerId);
                     joinedProfileUpdated = false;
@@ -1679,7 +1698,7 @@ export function useP2P() {
                     state.timeout = window.setTimeout(() => {
                         state.timeout = undefined;
                         if (sessions.current.get(msg.fromPeerId as string) === next && next.status !== 'connected') {
-                            state.inFlight = false; next.dispose?.(true);
+                            state.inFlight = false; next.dispose?.(true, 'reconnect_channel_timeout');
                         }
                     }, NEGOTIATION_TIMEOUT_MS);
                     return;
@@ -1720,8 +1739,9 @@ export function useP2P() {
                     } catch (error) {
                         if (socket !== ws.current || !live.current || sessions.current.get(session.peerId) !== session) return;
                         offering.delete(session.peerId);
+                        recordTransferDiagnostic('sdp_negotiation', error instanceof Error ? error.name : 'rejected', { messageType: msg.type, signalingState: peer.signalingState });
                         showToast(`Unable to negotiate with ${session.username}: ${String(error)}. Other room connections are still active.`);
-                        session.dispose?.();
+                        session.dispose?.(true, 'sdp_failed');
                     }
                 }
             }).catch(error => failSignaling(error instanceof Error ? error.message : String(error)));
@@ -2051,13 +2071,16 @@ export function useP2P() {
                     label: channel.label, state: channel.readyState, bufferedAmount: channel.bufferedAmount,
                 } : null),
             } : null,
-            iceServerHostnames: iceServerHostnames(ICE_SERVERS),
+            iceServerHostnames: iceServerHostnames(iceServersRef.current),
+            relayConfigured: hasRelayServer(iceServersRef.current),
+            lastConnectionFailure: lastConnectionFailure.current,
+            signalingStatus,
             events: getRecentDiagnostics(),
             sctpMaxMessageSize: peer?.sctp?.maxMessageSize ?? null,
             visibilityState: document.visibilityState,
         };
     };
-    return { roomId, roomType, connected, connectionType, signalingStatus, sendQueue, receivedFiles, onlineFiles, currentReceiving, currentReceivings,
+    return { roomId, roomType, connected, connectionType, signalingStatus, connectionNotice, sendQueue, receivedFiles, onlineFiles, currentReceiving, currentReceivings,
         members, selectedPeerIds, setSelectedPeerIds, selfPeerId,
         connectionFormKey, chatMessages, unreadCount, settings, username, isChatOpen, isSettingsOpen, inRoom, hasPeer, toast,
         setRoomId, join, retryConnection, leaveRoom, addFilesToQueue, pauseSending, resumeSending, retrySending, removeFromQueue, clearAllQueue,

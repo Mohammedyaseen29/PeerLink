@@ -4,7 +4,7 @@ PeerLink transfers files directly between browser peers. Rooms support two membe
 
 The signaling Worker exchanges room membership, SDP, and ICE messages. It does not relay file contents. WebRTC may use the configured TURN server when a direct network path is unavailable. Files and their catalog entries are shared with the connected peer.
 
-The initial SDP exchange has a 25-second deadline while waiting for the remote description. If the peer advertises reconnect support, the client then uses bounded retries after 1, 5, and 15 seconds; each reconnect attempt has its own 25-second timeout. After a remote description arrives, WebRTC connection-state failure handling covers ICE connectivity.
+Connections have a 45-second deadline for opening the data channels. If the peer advertises reconnect support, the client uses bounded retries after 1, 5, and 15 seconds, with a separate deadline for each attempt. Failed attempts preserve the room and expose connection diagnostics. The Worker supplies deployment-specific TURN settings; see [connection recovery and free relay setup](docs/connection-recovery.md).
 
 Persistent rooms keep received copies in that browser's IndexedDB so they can be reopened later. Temporary room copies are removed when the user leaves. Storage belongs to each device; it is not shared across members.
 

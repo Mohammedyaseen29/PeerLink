@@ -3,7 +3,38 @@ import { Hono } from "hono";
 
 type Bindings = {
   SIGNALING_ROOM: DurableObjectNamespace;
+  ICE_SERVERS?: string;
 };
+
+type IceServer = { urls: string[]; username?: string; credential?: string };
+function validIceUrl(value: unknown): value is string {
+  if (typeof value !== 'string' || value.length > 512) return false;
+  const match = /^(?:stun|stuns|turn|turns):(?:\[[0-9a-f:.]+\]|[a-z0-9.-]+)(?::([0-9]{1,5}))?(?:\?transport=(?:udp|tcp))?$/i.exec(value);
+  return !!match && (!match[1] || Number(match[1]) > 0 && Number(match[1]) <= 65535);
+}
+export function getIceConfiguration(raw?: string) {
+  const fallback: IceServer[] = [{ urls: ['stun:stun.l.google.com:19302'] }, { urls: ['stun:stun.cloudflare.com:3478'] }];
+  if (!raw?.trim()) return { iceServers: fallback, configurationError: false };
+  try {
+    const value: unknown = JSON.parse(raw);
+    if (!Array.isArray(value) || !value.length || value.length > 8) throw new Error();
+    const iceServers: IceServer[] = value.map(entry => {
+      if (!entry || typeof entry !== 'object') throw new Error();
+      const urls = typeof entry.urls === 'string' ? [entry.urls] : entry.urls;
+      if (!Array.isArray(urls) || !urls.length || urls.length > 8 || urls.some(url => !validIceUrl(url))) throw new Error();
+      for (const [key, max] of [['username', 512], ['credential', 2048]] as const) {
+        if (entry[key] !== undefined && (typeof entry[key] !== 'string' || entry[key].length > max)) throw new Error();
+      }
+      if (urls.some(url => /^turns?:/i.test(url)) && (!entry.username || !entry.credential)) throw new Error();
+      return { urls, ...(entry.username !== undefined ? { username: entry.username } : {}),
+        ...(entry.credential !== undefined ? { credential: entry.credential } : {}) };
+    });
+    return { iceServers, configurationError: false };
+  } catch {
+    // Never include a malformed secret or provider response in an error message.
+    return { iceServers: fallback, configurationError: true };
+  }
+}
 
 type RoomPeer = {
   peerId: string;
@@ -51,11 +82,13 @@ app.all("*", async (c) => {
   return c.text("Not a websocket request", 400);
 });
 
-export class SignalingRoom extends DurableObject {
+export class SignalingRoom extends DurableObject<Bindings> {
   private suspended = new Map<string, SuspendedSession>();
+  private iceConfiguration: ReturnType<typeof getIceConfiguration>;
 
   constructor(ctx: DurableObjectState, env: Bindings) {
     super(ctx, env);
+    this.iceConfiguration = getIceConfiguration(env.ICE_SERVERS);
     ctx.blockConcurrencyWhile(async () => {
       const records = await ctx.storage.get<SuspendedSession[]>(SUSPENDED_KEY);
       for (const record of records ?? []) {
@@ -558,7 +591,10 @@ export class SignalingRoom extends DurableObject {
       return false;
     }
     try {
-      ws.send(JSON.stringify(data));
+      // Only joined clients need the browser-usable ICE credentials. They are not
+      // broadcast in rosters, health responses, logs, or stored room attachments.
+      ws.send(JSON.stringify(data.type === 'joined' && data.protocolVersion === 2
+        ? { ...data, ...this.iceConfiguration } : data));
       return true;
     } catch {
       this.detachSocket(ws, 1011, "Signaling delivery failed", announceFailure);

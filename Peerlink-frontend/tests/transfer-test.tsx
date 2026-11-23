@@ -1,7 +1,7 @@
 import { StrictMode, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import { useP2P } from '../src/hooks/useP2P';
-import { openDB, deleteFile, getChunkIndices, getFilesInRoom, releasePreviewUrl, type FileMetadata } from '../src/ProgressDB';
+import { openDB, deleteFile, getChunkIndices, getFilesInRoom, getStoredFiles, clearRoom, releasePreviewUrl, type FileMetadata } from '../src/ProgressDB';
 
 type Peer = ReturnType<typeof useP2P>;
 const peers: Peer[] = [];
@@ -24,12 +24,13 @@ function instrumentDataChannel(channel: RTCDataChannel) {
                         : ArrayBuffer.isView(data) ? data.byteLength : 0;
             nativeDataFrameSizes.push(size);
         }
-        return nativeDataSend.call(this, data);
+        return Reflect.apply(nativeDataSend, this, [data]);
     };
 }
 const NativeRTCPeerConnection = window.RTCPeerConnection;
 window.RTCPeerConnection = new Proxy(NativeRTCPeerConnection, {
     construct(target, args, newTarget) {
+        if (new URLSearchParams(location.search).has('relay')) args[0] = { ...args[0], iceTransportPolicy: 'relay' };
         const peer = Reflect.construct(target, args, newTarget) as RTCPeerConnection;
         rtcPeers.push(peer);
         const nativeCreateDataChannel = peer.createDataChannel.bind(peer);
@@ -174,12 +175,12 @@ async function verifyExactMedia(meta: FileMetadata, expected: Uint8Array, expect
 async function runTwoMemberCapacityTest(room: string, append: (line: string) => void, extended: boolean) {
     append('Joining a two-member room, rejecting a third join, and retaining the open pair...');
     peers[0].join(room, 'temporary');
-    await until(() => peers[0].inRoom && peers[0].selfPeerId && peers[0].signalingStatus === 'waiting', 'first signaling member joined');
+    await until(() => peers[0].inRoom && !!peers[0].selfPeerId && peers[0].signalingStatus === 'waiting', 'first signaling member joined');
     peers[1].join(room);
     await until(() => peers.slice(0, 2).every(peer => peer.inRoom && peer.members.length === 1 && peer.connected &&
         peer.members[0]?.status === 'connected'), 'two-member mesh connected');
     peers[2].join(room);
-    await until(() => peers[2].signalingStatus === 'full' && peers[2].toast?.message.includes('2 people') &&
+    await until(() => peers[2].signalingStatus === 'full' && peers[2].toast?.message.includes('2 people') === true &&
         peers[2].members.length === 0, 'third member rejected at room capacity');
     const connectedSockets = () => signalingSockets.filter(entry => entry.socket.readyState === WebSocket.OPEN);
     if (connectedSockets().length !== 2 || peers.slice(0, 2).some(peer => peer.members.length !== 1 || !peer.connected)) {
@@ -272,6 +273,7 @@ function Tests() {
     const [log, setLog] = useState('Ready');
     const [running, setRunning] = useState(false);
     const [mounted, setMounted] = useState(true);
+    const [cleanupRooms, setCleanupRooms] = useState<Array<{ roomId: string; count: number; createdAt: number }>>([]);
     const groupMode = new URLSearchParams(location.search).has('group');
     const failureMode = new URLSearchParams(location.search).has('group-failure');
     const membershipMode = new URLSearchParams(location.search).has('membership');
@@ -404,6 +406,15 @@ function Tests() {
             if (new URLSearchParams(location.search).has('speed')) {
                 append('ENGINE METRICS: ' + JSON.stringify(peers.map(peer => peer.transferMetrics)));
                 const diagnostics = await Promise.all(peers.map(peer => peer.getTransferDiagnostics().catch(error => ({ error: String(error) }))));
+                if (new URLSearchParams(location.search).has('relay')) {
+                    if (diagnostics.some(value => !('selectedCandidatePair' in value) || !value.selectedCandidatePair ||
+                        value.selectedCandidatePair.localCandidateType !== 'relay' || value.selectedCandidatePair.remoteCandidateType !== 'relay')) {
+                        throw new Error('Forced-relay test did not select relay candidates on both ends.');
+                    }
+                    peers[0].sendChatMessage('forced-relay chat');
+                    await until(() => peers[1].chatMessages.some(message => message.content === 'forced-relay chat'), 'relayed chat delivery');
+                    append('PASS: forced TURN relay on both devices, exact file bytes and chat delivery');
+                }
                 append('TRANSPORT DIAGNOSTICS: ' + JSON.stringify(diagnostics));
                 for (const meta of peers[1].receivedFiles) await deleteFile(meta.fileId);
                 setMounted(false);
@@ -557,6 +568,16 @@ function Tests() {
         finally { setRunning(false); }
     }
     return <main><h1>PeerLink integration tests</h1><button disabled={running || !mounted} onClick={() => void run()}>Run integration tests</button>
-        {mounted && Array.from({ length: groupMode || failureMode || membershipMode ? 3 : 2 }, (_, index) => <PeerPanel key={index} index={index} />)}<pre style={{ whiteSpace: 'pre-wrap' }}>{log}</pre></main>;
+        {mounted && Array.from({ length: groupMode || failureMode || membershipMode ? 3 : 2 }, (_, index) => <PeerPanel key={index} index={index} />)}<pre style={{ whiteSpace: 'pre-wrap' }}>{log}</pre>
+        <button disabled={running} onClick={() => void getStoredFiles().then(files => {
+            const rooms = new Map<string, { roomId: string; count: number; createdAt: number }>();
+            for (const file of files) if (/^test-[a-f0-9-]{36}$/.test(file.roomId)) {
+                const item = rooms.get(file.roomId) || { roomId: file.roomId, count: 0, createdAt: file.createdAt };
+                item.count++; item.createdAt = Math.max(item.createdAt, file.createdAt); rooms.set(file.roomId, item);
+            }
+            setCleanupRooms([...rooms.values()].sort((a, b) => b.createdAt - a.createdAt));
+        })}>List interrupted test rooms</button>
+        {cleanupRooms.map(item => <p key={item.roomId}>{item.roomId} — {item.count} files — {new Date(item.createdAt).toISOString()} <button onClick={() => void clearRoom(item.roomId).then(() => setCleanupRooms(current => current.filter(room => room.roomId !== item.roomId)))}>Remove files for {item.roomId}</button></p>)}
+        </main>;
 }
 createRoot(document.getElementById('root')!).render(<StrictMode><Tests /></StrictMode>);

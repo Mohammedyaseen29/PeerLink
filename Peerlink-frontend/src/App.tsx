@@ -69,6 +69,7 @@ function App() {
     connected,
     connectionType,
     signalingStatus,
+    connectionNotice,
     sendQueue,
     receivedFiles,
     onlineFiles,
@@ -437,7 +438,7 @@ function App() {
             <div className="room-status-icon" aria-hidden="true"><RoomStatusIcon size={19} className={RoomStatusIcon === LoaderCircle ? "room-status-spinner" : undefined} /></div>
             <div className="room-status-copy" role="status" aria-live="polite">
               <strong>{connected && signalingStatus === "offline" ? "Reconnecting the room service" : roomStatusTitle}</strong>
-              <span>{connected && signalingStatus === "offline" ? "Your direct file connection stays active while the room reconnects." : roomStatusMessage}</span>
+              <span>{connected && signalingStatus === "offline" ? "Your direct file connection stays active while the room reconnects." : signalingStatus === "unreachable" && connectionNotice ? connectionNotice : roomStatusMessage}</span>
             </div>
             {canCopyConnectionDetails && <div className="workspace-status-actions">
               {signalingStatus === "offline" && <button type="button" className="room-status-retry" onClick={retryConnection}><RefreshCw size={15} />Retry</button>}
