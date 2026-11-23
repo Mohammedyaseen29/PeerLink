@@ -97,10 +97,16 @@ This makes missing/unreachable hotspot ICE candidates a plausible cause. It is
 not a confirmed device-level diagnosis without that phone's ICE report. A web
 page cannot choose a hidden Android tethering interface or change its OS routing.
 
-The laptop's enabled Chrome firewall rules allow inbound UDP/TCP on its active
-Public network profile, and Chrome/Edge mDNS rules allow UDP 5353. These checks
-did not identify a missing Chrome allow rule. No firewall, browser privacy or
-hotspot security settings were changed.
+The initial firewall audit found rules named `chrome.exe` that allow inbound
+UDP/TCP on Public networks. A subsequent executable-path comparison showed those
+rules do not match the Chrome executable actually running on this laptop. For
+that executable, the matching inbound rule allows mDNS discovery on UDP 5353
+only. The effective Public profile blocks unmatched inbound traffic and allows
+outbound traffic. This is another possible restriction on a direct path, not
+proof that it caused this ICE failure: replies associated with outbound traffic
+can still be allowed. Device ICE reports and a controlled retest are needed
+before proposing a firewall exception. No firewall, browser privacy or hotspot
+security settings were changed.
 
 Two app reporting issues were also corrected: local sessions were collapsed
 into the generic P2P label, and the selected ICE route was sampled only once at
