@@ -300,9 +300,6 @@ h1 > span { color: #c4f55a; }
 .toast-message-text { flex: 1; min-width: 0; }
 .toast-error { border-color: #b56e63; background: #3d2822; color: #f1c2b8; }
 .toast-info { border-color: #697c53; background: #2a3623; }
-.connection-details-fallback { display: flex; flex-direction: column; align-items: flex-start; gap: 14px; margin-top: 18px; }
-.connection-details-fallback label { color: #d1dfc4; font-size: .875rem; }
-.connection-details-fallback textarea { width: 100%; resize: vertical; min-height: 150px; max-height: 400px; padding: 14px; border: 1px solid #445439; background: #121a10; color: #d5e6c3; border-radius: 9px; font-family: Consolas, monospace; font-size: .8125rem; }
 .unavailable-transfer { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 20px; min-height: 450px; height: 100%; text-align: center; }
 .unavailable-transfer > svg { color: #a8bc90; }
 .unavailable-transfer h2 { font-size: 1.5rem; font-weight: 500; }
