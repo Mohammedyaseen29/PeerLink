@@ -246,6 +246,7 @@ function App() {
         return;
       }
       const serialized = JSON.stringify(details, null, 2);
+      setManualDiagnostics(serialized);
       try {
         if (!navigator.clipboard?.writeText) throw new Error("Clipboard access is unavailable in this browser.");
         await navigator.clipboard.writeText(serialized);
@@ -420,6 +421,8 @@ function App() {
               connected={connected}
               inRoom={inRoom}
               connectionType={connectionType}
+              onConnectionDetails={signalingStatus !== 'offline' ? () => void handleCopyDiagnostics() : undefined}
+              copyingDetails={copyingDiagnostics}
               signalingStatus={signalingStatus}
               roomType={roomType}
               generateRoomId={generateRoomId}
@@ -447,7 +450,7 @@ function App() {
           </section>
         )}
         {showRoomMembers && <GroupMembers members={members} username={username} avatar={settings.avatar} selfOnline={signalingStatus !== "offline"} onRetryPeer={retryPeerConnection} />}
-        {manualDiagnostics && <section className="connection-details-fallback glass-card" aria-label="Manual connection details copy">
+        {manualDiagnostics && <section className="connection-details-fallback glass-card" aria-label="Connection details report">
           <label htmlFor="connection-details-text">Connection details — select and copy</label>
           <textarea id="connection-details-text" readOnly value={manualDiagnostics} rows={6} onFocus={event => event.currentTarget.select()} />
           <button type="button" className="btn btn-secondary btn-sm" onClick={() => setManualDiagnostics(null)}>Dismiss details</button>

@@ -85,3 +85,45 @@ The free relay was slow on this route: 180.60 seconds for that transfer, about
 Direct local connections remain preferred. The actual Chrome/Edge laptop-to-phone
 pair still needs a user retest; the specific restriction on its direct Wi-Fi path
 was not established from the brief status report.
+
+## A phone hosting its own peer's hotspot
+
+The user confirmed that the participating phone also provides the laptop's
+hotspot. This differs from two devices being clients of a separate Wi-Fi router.
+Android documents the hotspot interface as a local network separate from the
+networks used to obtain internet access, with explicit discovery requirements for
+some applications. See [NET_CAPABILITY_LOCAL_NETWORK](https://developer.android.com/reference/android/net/NetworkCapabilities#NET_CAPABILITY_LOCAL_NETWORK).
+This makes missing/unreachable hotspot ICE candidates a plausible cause. It is
+not a confirmed device-level diagnosis without that phone's ICE report. A web
+page cannot choose a hidden Android tethering interface or change its OS routing.
+
+The laptop's enabled Chrome firewall rules allow inbound UDP/TCP on its active
+Public network profile, and Chrome/Edge mDNS rules allow UDP 5353. These checks
+did not identify a missing Chrome allow rule. No firewall, browser privacy or
+hotspot security settings were changed.
+
+Two app reporting issues were also corrected: local sessions were collapsed
+into the generic P2P label, and the selected ICE route was sampled only once at
+channel open. The route now follows selected-pair changes, with a bounded
+three-second stats poll for browsers that do not deliver the event. A stats
+error leaves the working transport intact; disposal removes its timer/listeners.
+Unknown or public host addresses use the conservative P2P label instead of
+claiming a local network. The app explicitly uses ICE policy `all`; only the test
+fixture's optional relay mode forces `relay`.
+
+Connection details are available while connected and shown as a copyable report.
+They include the actual ICE policy, observed route, separate local/remote
+candidate counts and up to 64 candidate-pair check summaries. No IP addresses,
+ICE URLs, SDP or credentials are included in these summaries. Unanswered direct
+checks and missing direct candidates can then be distinguished from a stale UI
+badge. Connect both peers as clients of a separate router or a third phone's
+hotspot for a useful comparison with the host-phone scenario; direct connection
+still depends on that network allowing it.
+
+Validation of the reporting fix: 51 frontend regression tests and the production
+build passed. Two real app tabs joined a temporary room through production
+signaling with TURN configured. Their connected-state UI exposed the report;
+it showed ICE policy `all`, the active host/host UDP pair and a matching P2P
+badge. Candidate-pair request/response counts were visible without addresses.
+Unit tests cover selected-pair precedence, local aggregation, public/hidden
+address handling, relay-to-direct changes, stale async reads and monitor cleanup.

@@ -77,7 +77,9 @@ const connectionConfig = {
 };
 
 export function ConnectionIndicator({ connected, connectionType, status }: ConnectionIndicatorProps) {
-    const config = connected ? connectionConfig[connectionType] : connectionConfig[status && status !== "idle" ? status : "disconnected"];
+    const config = connected && connectionType === 'disconnected'
+        ? { icon: LoaderCircle, label: 'Checking route', color: 'indicator-p2p', description: 'Connected; checking the active network path' }
+        : connected ? connectionConfig[connectionType] : connectionConfig[status && status !== "idle" ? status : "disconnected"];
     const Icon = config.icon;
 
     return (

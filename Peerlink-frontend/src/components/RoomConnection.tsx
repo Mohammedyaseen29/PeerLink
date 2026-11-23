@@ -22,11 +22,13 @@ interface RoomConnectionProps {
     signalingStatus: SignalingStatus;
     onLeave: () => void;
     onReconnect?: () => void;
+    onConnectionDetails?: () => void;
+    copyingDetails?: boolean;
 }
 
 export function RoomConnection({
     roomId, onRoomIdChange, onJoin, connected, inRoom, connectionType,
-    roomType, generateRoomId, signalingStatus, onLeave, onReconnect,
+    roomType, generateRoomId, signalingStatus, onLeave, onReconnect, onConnectionDetails, copyingDetails,
 }: RoomConnectionProps) {
     const [mode, setMode] = useState<RoomMode>("create");
     const [inputValue, setInputValue] = useState(roomId);
@@ -204,6 +206,9 @@ export function RoomConnection({
                         </p>
                     </div>
                     <div className="connect-session-actions">
+                        {connected && onConnectionDetails && <button type="button" className="btn btn-secondary connect-retry" onClick={onConnectionDetails} disabled={copyingDetails}>
+                            <Copy size={15} />{copyingDetails ? 'Copying…' : 'Connection details'}
+                        </button>}
                         {!connected && onReconnect && signalingStatus !== "unsupported" && (
                             <button type="button" className="btn btn-secondary connect-retry" onClick={onReconnect}>
                                 <RefreshCw size={15} />

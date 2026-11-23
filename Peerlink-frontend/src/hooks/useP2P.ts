@@ -8,6 +8,7 @@ import { getRandomAvatar } from '../components/avatars';
 import { createRemotePreviewUrl, MAX_PREVIEW_RANGE_BYTES, RangeBroker, type PreviewRangeRequest, type PreviewRangeResponse, waitForPreviewServiceWorker } from '../preview/RangeBroker';
 import { getRecentDiagnostics, recordTransferDiagnostic } from '../transferDiagnostics';
 import { DEFAULT_ICE_SERVERS, parseIceServers, hasRelayServer, connectionFailureMessage, type FailedConnection } from '../connection/iceConfiguration';
+import { aggregateConnectionType, selectedIcePair, summarizeIcePaths, watchConnectionPath } from '../connection/connectionPath';
 
 export { getRecentDiagnostics } from '../transferDiagnostics';
 
@@ -179,6 +180,7 @@ type PeerSession = {
     connectionType: ConnectionType;
     initialNegotiationTimer?: number;
     iceDisconnectTimer?: number;
+    stopPathMonitor?: () => void;
     outgoingCatalogRevision: number;
     catalogSendChain: Promise<void>;
     incomingCatalogRevision: number;
@@ -823,7 +825,7 @@ export function useP2P() {
         const liveSessions = [...sessions.current.values()].filter(item => item.status === 'connected');
         setHasPeer(liveSessions.length > 0);
         setConnected(liveSessions.length > 0);
-        setConnectionType(liveSessions.length ? (liveSessions.some(item => item.connectionType === 'relay') ? 'relay' : 'p2p') : 'disconnected');
+        setConnectionType(aggregateConnectionType(liveSessions.map(item => item.connectionType)));
     };
     const acceptSessionCatalog = (session: PeerSession, message: Record<string, unknown>): string | null => {
         const { revision, index, chunkCount, files } = message;
@@ -952,7 +954,7 @@ export function useP2P() {
         setMembers(current => current.some(item => item.peerId === member.peerId)
             ? current.map(item => item.peerId === member.peerId ? { ...item, ...member, connectionType: 'disconnected', status: 'connecting' } : item)
             : [...current, { ...member, connectionType: 'disconnected', status: 'connecting' }]);
-        const peer = new RTCPeerConnection({ iceServers: iceServersRef.current }); session.pc = peer;
+        const peer = new RTCPeerConnection({ iceServers: iceServersRef.current, iceTransportPolicy: 'all' }); session.pc = peer;
         recordTransferDiagnostic('peer_connection_created', undefined, {
             serverCount: iceServersRef.current.length,
             serverHostnames: iceServerHostnames(iceServersRef.current).join(', ').slice(0, 512),
@@ -969,6 +971,7 @@ export function useP2P() {
         previews.binaryType = 'arraybuffer'; previews.bufferedAmountLowThreshold = PREVIEW_BUFFER_HIGH_WATER / 2;
         const closeSession = (retry = true, reason = 'transport_closed') => {
             if (sessions.current.get(session.peerId) !== session) return;
+            session.stopPathMonitor?.(); session.stopPathMonitor = undefined;
             if (retry) {
                 const failure: FailedConnection = { reason, connectionState: peer.connectionState,
                     iceConnectionState: peer.iceConnectionState, iceGatheringState: peer.iceGatheringState,
@@ -1013,7 +1016,7 @@ export function useP2P() {
             const liveSessions = [...sessions.current.values()].filter(item => item.status === 'connected');
             if (live.current) {
                 setHasPeer(liveSessions.length > 0); setConnected(liveSessions.length > 0);
-                setConnectionType(liveSessions.length ? (liveSessions.some(item => item.connectionType === 'relay') ? 'relay' : 'p2p') : 'disconnected');
+                setConnectionType(aggregateConnectionType(liveSessions.map(item => item.connectionType)));
                 setSignalingStatus(liveSessions.length ? 'negotiating' : roomMembers.current.size ? 'unreachable' : 'waiting');
             }
             if (retry) onTransportLost?.(session);
@@ -1085,6 +1088,7 @@ export function useP2P() {
         transferEngines.current.add(session.engine);
         const opened = () => {
             if (sessions.current.get(session.peerId) !== session || commands.readyState !== 'open' || chunks.readyState !== 'open') return;
+            if (session.status === 'connected') return;
             recordTransferDiagnostic('data_channels_open', undefined, { control: commands.readyState, data: chunks.readyState });
             lastConnectionFailure.current = null; setConnectionNotice(null);
             if (session.initialNegotiationTimer !== undefined) {
@@ -1092,15 +1096,13 @@ export function useP2P() {
                 session.initialNegotiationTimer = undefined;
             }
             onTransportConnected?.(session);
-            updateMember(session, 'connected', 'p2p'); setSignalingStatus('negotiating');
+            updateMember(session, 'connected'); setSignalingStatus('negotiating');
             publishSessionCatalog(session); scheduleRecipientTransfers();
-            void peer.getStats().then(stats => {
-                if (sessions.current.get(session.peerId) !== session) return;
-                let id: string | undefined; stats.forEach(report => { if (report.type === 'transport') id = report.selectedCandidatePairId; });
-                const pair = id ? stats.get(id) : undefined; if (!pair) return;
-                const cs = [stats.get(pair.localCandidateId), stats.get(pair.remoteCandidateId)];
-                updateMember(session, 'connected', cs.some(candidate => candidate?.candidateType === 'relay') ? 'relay' : cs.every(candidate => candidate?.candidateType === 'host') ? 'local' : 'p2p');
-            }).catch(() => undefined);
+            session.stopPathMonitor = watchConnectionPath(peer, type => {
+                if (session.connectionType === type) return;
+                recordTransferDiagnostic('connection_path', type);
+                updateMember(session, 'connected', type);
+            }, () => live.current && sessions.current.get(session.peerId) === session && session.status === 'connected');
         };
         commands.onopen = opened; chunks.onopen = opened;
         commands.onclose = () => { recordTransferDiagnostic('data_channel_state', 'control_closed'); closeSession(true, 'control_channel_closed'); };
@@ -1993,15 +1995,13 @@ export function useP2P() {
         const session = [...sessions.current.values()].find(item => item.pc);
         const peer = session?.pc;
         let selectedCandidatePair: Record<string, string | number | null> | null = null;
+        let icePaths: ReturnType<typeof summarizeIcePaths> | null = null;
         const candidateTypeCounts: Record<string, number> = {};
         const dataChannels: Array<Record<string, string | number | null>> | null = peer ? [] : null;
         if (peer) {
             const stats = await peer.getStats();
-            let pairId: string | undefined;
+            icePaths = summarizeIcePaths(stats);
             stats.forEach(report => {
-                if (report.type === 'transport' && typeof report.selectedCandidatePairId === 'string') {
-                    pairId = report.selectedCandidatePairId;
-                }
                 if (report.type === 'data-channel') {
                     const channel = report as RTCStats & {
                         label?: string; dataChannelIdentifier?: number; state?: string;
@@ -2023,13 +2023,8 @@ export function useP2P() {
                     candidateTypeCounts[candidateType] = (candidateTypeCounts[candidateType] || 0) + 1;
                 }
             });
-            let pair = pairId ? stats.get(pairId) : undefined;
-            let selectionSource: 'transport' | 'nominated-fallback' = pair ? 'transport' : 'nominated-fallback';
-            if (!pair) {
-                stats.forEach(report => {
-                    if (!pair && report.type === 'candidate-pair' && report.state === 'succeeded' && report.nominated) pair = report;
-                });
-            }
+            const selected = selectedIcePair(stats);
+            const pair = selected?.pair;
             if (pair) {
                 const p = pair as RTCStats & {
                     localCandidateId?: string; remoteCandidateId?: string;
@@ -2040,7 +2035,7 @@ export function useP2P() {
                 const remote = p.remoteCandidateId ? stats.get(p.remoteCandidateId) as (RTCStats & { candidateType?: string; protocol?: string }) : undefined;
                 // Candidate-pair RTT is measured by ICE/STUN checks; discard counters are socket handoff errors, not SCTP loss counters.
                 selectedCandidatePair = {
-                    selectionSource,
+                    selectionSource: selected!.source,
                     localCandidateType: local?.candidateType ?? null,
                     remoteCandidateType: remote?.candidateType ?? null,
                     localProtocol: local?.protocol ?? null,
@@ -2060,6 +2055,9 @@ export function useP2P() {
             peerId: session?.peerId ?? null,
             transferMetrics: { ...syncAggregateMetrics() },
             selectedCandidatePair,
+            icePaths,
+            iceTransportPolicy: peer?.getConfiguration().iceTransportPolicy ?? null,
+            observedConnectionType: session?.connectionType ?? null,
             candidateTypeCounts,
             dataChannels,
             connection: peer ? {
